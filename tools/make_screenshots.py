@@ -20,13 +20,19 @@ import design  # noqa: E402
 OUT = os.path.join(ROOT, "docs")
 SCALE = 2  # crisp on high-DPI screens; the README displays them at half size
 
+_HOURS = [0.0] * 24
+for _h, _v in {9: 1800, 10: 3300, 11: 2900, 12: 900, 14: 2400, 15: 3100, 16: 1500}.items():
+    _HOURS[_h] = _v
+
 DEMO = dict(
-    total=4 * 3600 + 12 * 60, limit=6 * 3600, session=38 * 60, interval=50 * 60,
+    total=4 * 3600 + 12 * 60, limit=6 * 3600, session=38 * 60, break_in=12 * 60,
     apps=[("chrome", 6200), ("Code", 4300), ("Discord", 1900), ("Spotify", 1100), ("Steam", 600)],
-    week=[("Mon", 5.2 * 3600, False), ("Tue", 6.8 * 3600, False), ("Wed", 3.9 * 3600, False),
-          ("Thu", 4.6 * 3600, False), ("Fri", 5.5 * 3600, False), ("Sat", 2.4 * 3600, False),
-          ("Sun", 4 * 3600 + 12 * 60, True)],
-    date_str="Sunday, November 22", state="active", current_app="Code",
+    week=[dict(label=lbl, total=t * 3600, breaks=b, break_sec=bm * 60, today=(lbl == "Sun"))
+          for lbl, t, b, bm in [("Mon", 5.2, 4, 22), ("Tue", 6.8, 2, 10), ("Wed", 3.9, 5, 27),
+                                ("Thu", 4.6, 3, 16), ("Fri", 5.5, 4, 20), ("Sat", 2.4, 1, 6),
+                                ("Sun", 4.2, 3, 15)]],
+    date_str="Sunday, November 22", state="active", current_app="Code", break_len_min=5,
+    breaks=3, break_sec=15 * 60, longest=72 * 60, first="9:12", hours=_HOURS, hour_now=16,
 )
 
 
@@ -61,7 +67,11 @@ def settings_shot():
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    design.render_dashboard(DEMO, SCALE).save(os.path.join(OUT, "dashboard.png"))
+    design.render_dashboard(DEMO, SCALE, tab="overview")[0].save(os.path.join(OUT, "dashboard.png"))
+    design.render_dashboard(DEMO, SCALE, tab="analytics")[0].save(os.path.join(OUT, "analytics.png"))
+    img, _ = design.render_break(0, 300, "Your eyes, back and mind will thank you.", True, None, SCALE,
+                                 breaks_today=3)
+    img.save(os.path.join(OUT, "break-done.png"))
     img, _ = design.render_popup(
         "break", "Time for a break",
         "You've been at the screen for 52m straight. Stand up, stretch, and look at something far away.",
