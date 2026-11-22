@@ -38,7 +38,7 @@ When the break starts, a clean full-screen page covers **every monitor, on top o
 
 Need to get back urgently? **End break early** is always there. Ending early counts as a snooze, so you'll be reminded again in 10 minutes.
 
-**Trigger a break whenever you want:** click **☕ Take a break now** on the dashboard, or choose it from the tray menu.
+**Trigger a break whenever you want:** click **☕ 5 min break** on the dashboard, or choose it from the tray menu.
 
 <p>
 <picture>
@@ -47,6 +47,19 @@ Need to get back urgently? **End break early** is always there. Ending early cou
 </picture>
 <img src="docs/break-done.png" alt="Break complete screen: your 3rd break today" width="380">
 </p>
+
+### Open break: stop when you want
+Sometimes you don't know how long you'll be away: lunch, a call, a walk. Click **🧘 Open break** on the dashboard (or **Take an open break** in the tray menu). The same full-screen page covers everything, but instead of a countdown a timer **counts up** while you're away. Click **I'm back** whenever you're ready.
+
+- It's **recorded in Analytics** like any other break: it counts toward *Breaks* and *Break time*.
+- Once you've been away for your break length (5 min by default), a green tag tells you it was a good break, and the 50-minute timer starts fresh when you come back.
+- Shorter open breaks still count as breaks, but your current stretch continues.
+- Ending it within 10 seconds counts as a misclick, so nothing is recorded.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/open-break-dark.png">
+  <img src="docs/open-break.png" alt="Open break screen: a timer counting up and an I'm back button" width="380">
+</picture>
 
 Being away from the PC for 5 minutes, or putting it to sleep, also counts as a break and resets the timer automatically.
 
@@ -59,7 +72,7 @@ Set a daily screen-time budget (default **6 hours**). You get a heads-up at **80
 Double-click the tray icon to open the dashboard, laid out like a Notion page:
 
 - **Status**, **Break in** (live countdown), **Since break**, **Breaks today** and **Left today**, shown as page properties
-- **☕ Take a break now** button
+- **☕ 5 min break**, **🧘 Open break** and **🌙 DND** buttons
 - **Today's total** with a progress bar that turns orange, then red, as you approach your limit
 - **Top apps**: which programs your time goes to
 - **Last 7 days**: a bar chart with your limit drawn as a dashed line
@@ -79,7 +92,7 @@ Switch to the **Analytics** tab for the detail:
   <img src="docs/analytics.png" alt="Analytics tab: stat cards, activity by hour, and a 7-day table with breaks and break time" width="780">
 </picture>
 
-Breaks are counted whether you finish the break timer, step away for 5+ minutes, or put the PC to sleep.
+Breaks are counted whether you finish the break timer, take an open break, step away for 5+ minutes, or put the PC to sleep.
 
 ### A tray icon that tells you how you're doing
 The icon is a small Notion-style tile with an hourglass whose sand shows your day. It drains from the top into the bottom as you approach your daily limit: blue while you're on track, orange near your limit, red when you're over. During Do not disturb it shows a moon. The tile is light or dark to match your taskbar, so you can check your day without opening anything.
@@ -95,8 +108,8 @@ The icon is a small Notion-style tile with an hourglass whose sand shows your da
 For moments when you need to be fully focused, such as an exam, a meeting, a presentation or deep work, turn on **Do not disturb**:
 
 - **Nothing pops up:** no break reminders and no limit warnings. A popup already on screen disappears too.
-- Choose **30 minutes, 1 hour, 2 hours, or until you turn it off** from the tray menu, or click **🌙 Do not disturb** on the dashboard for an hour.
-- Your screen time is **still tracked**, and **Take a break now** still works if you decide to.
+- Choose **30 minutes, 1 hour, 2 hours, or until you turn it off** from the tray menu, or click **🌙 DND** on the dashboard for an hour.
+- Your screen time is **still tracked**, and you can still start a break yourself.
 - The tray icon shows a moon, and the dashboard shows when DND ends.
 - It stays on through a restart or reboot until its end time.
 - When DND ends you get **at most one** catch-up reminder if a break is overdue. Nothing piles up.
@@ -105,7 +118,10 @@ For moments when you need to be fully focused, such as an exam, a meeting, a pre
 Choose **System**, **Light** or **Dark** under *Appearance* in Settings. **System** (the default) follows your Windows light/dark setting and switches automatically when you change it. The dashboard, popups, break screen, settings and even the window title bars follow along. The images in this README match your GitHub theme too.
 
 ### Only *real* use counts
-Time only counts while you're actually using the PC. Counting stops after 2 minutes without mouse or keyboard input, while the screen is locked, and while the PC sleeps.
+Time only counts while you're actually using the PC. Counting stops after 2 minutes without mouse or keyboard input, while the screen is locked, and while the PC sleeps. Store apps are counted under their own names, for example *Calculator* instead of *ApplicationFrameHost*.
+
+### Smooth and lightweight
+All drawing happens on a background thread, so moving the mouse, hovering buttons and the countdowns stay smooth while the dashboard updates. Popups and the break screen animate at up to ~120 fps. The tray menu is only rebuilt when its text actually changes.
 
 ### Settings
 Everything is adjustable, including whether it starts with Windows.
@@ -161,10 +177,11 @@ An hourglass icon appears in the system tray. If you don't see it, click the **^
 | Action | How |
 |---|---|
 | Open the dashboard | Double-click the tray icon |
-| Take a break right now | **☕ Take a break now** on the dashboard, or the tray menu |
+| Take a timed break right now | **☕ 5 min break** on the dashboard, or the tray menu |
+| Take an open break (stop when you want) | **🧘 Open break** on the dashboard, or the tray menu |
 | See time until your next break | Hover over the tray icon, open the tray menu, or look at the dashboard |
-| Do not disturb (30 min, 1 h, 2 h, or until turned off) | Tray menu → **Do not disturb**, or **🌙 Do not disturb** on the dashboard (1 hour) |
-| Take a break now, settings, start with Windows, quit | Right-click the tray icon |
+| Do not disturb (30 min, 1 h, 2 h, or until turned off) | Tray menu → **Do not disturb**, or **🌙 DND** on the dashboard (1 hour) |
+| Breaks, settings, start with Windows, quit | Right-click the tray icon |
 
 ## Known limitations
 
@@ -181,9 +198,17 @@ An hourglass icon appears in the system tray. If you don't see it, click the **^
 |---|---|
 | `config.json` | Your settings |
 | `usage.json` | Per day (last 60 days): total and per-app time, activity by hour, breaks and break time, longest stretch |
+| `state.json` | Whether Do not disturb is on, and until when |
 | `error.log` | Only created if something goes wrong |
 
-To reset everything, quit the app and delete the `.screenbalance` folder. If a data file ever gets damaged, it's kept as a `*.corrupt-<date>` backup instead of being overwritten.
+To reset everything, quit the app and delete the `.screenbalance` folder.
+
+Your history is protected:
+
+- If a data file ever gets damaged, it's kept as a `*.corrupt-<date>` backup instead of being overwritten.
+- If it's temporarily locked (by antivirus or a backup tool), the app keeps tracking in memory and merges into the file once it can be read again.
+- It saves every 30 seconds and when Windows shuts down.
+- Anything unexpected is written to `error.log`.
 
 ## Project layout
 
