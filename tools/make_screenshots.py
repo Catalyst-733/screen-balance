@@ -89,6 +89,7 @@ def main():
 
     img, _ = design.render_break(187, 300, design.BREAK_TIPS[1], False, None, SCALE)
     img.save(os.path.join(OUT, "break-timer.png"))
+    design.render_open_break(412, 300, design.BREAK_TIPS[0], None, SCALE)[0]         .save(os.path.join(OUT, "open-break.png"))
 
     states = ((0.35, False), (0.85, False), (1.1, False), (0.5, True))
     for dark, name in ((False, "tray-icons.png"), (True, "tray-icons-dark.png")):
@@ -104,6 +105,7 @@ def main():
     design.render_dashboard(DEMO, SCALE, tab="analytics")[0].save(os.path.join(OUT, "analytics-dark.png"))
     img, _ = design.render_break(187, 300, design.BREAK_TIPS[1], False, None, SCALE)
     img.save(os.path.join(OUT, "break-timer-dark.png"))
+    design.render_open_break(412, 300, design.BREAK_TIPS[0], None, SCALE)[0]         .save(os.path.join(OUT, "open-break-dark.png"))
     design.set_theme(False)
 
     settings_shot("light", "settings.png")

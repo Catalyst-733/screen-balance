@@ -84,9 +84,9 @@ TAGS = dict(LIGHT_TAGS)
 
 
 def set_theme(dark: bool) -> None:
-    THEME.clear()
+    # update() (never clear()) so a background render reading the palette mid-switch
+    # always finds every key; both palettes have exactly the same keys
     THEME.update(DARK if dark else LIGHT)
-    TAGS.clear()
     TAGS.update(DARK_TAGS if dark else LIGHT_TAGS)
 
 
@@ -140,6 +140,13 @@ def fmt_clock(seconds):
     h, rem = divmod(s, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def ordinal(n):
+    """1st, 2nd, 3rd, 4th ... 11th, 12th, 13th ... 21st, 22nd, 23rd."""
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
 
 
 def usage_color(ratio):
@@ -351,27 +358,33 @@ def _overview(p, data, hover, hits):
     else:
         p.tag(vx, 262, f"Over by {fmt_dur(total - limit)}", "red")
 
-    label = "Take a break now"
-    bw = Painter.button_width(p, label, 13, icon=True)
-    box = (L, 284, L + bw, 316)
-    p.button(box, label, False, hover == "break_now", icon="☕")
-    hits.append(("break_now", box))
-
-    # do not disturb toggle
+    # action buttons: timed break, open break, do not disturb
     dnd_on = state == "dnd"
-    label = "Turn off DND" if dnd_on else "Do not disturb"
-    x0 = box[2] + 8
-    box = (x0, 284, x0 + Painter.button_width(p, label, 13, icon=True), 316)
-    if dnd_on:
-        bg, fg = TAGS["purple"]
-        p.rrect(box, 6, fill=lerp(bg, fg, 0.12) if hover == "dnd" else bg)
-        tw = p.textlen(label, 13, "semibold")
-        start = (box[0] + box[2]) / 2 - (tw + 21) / 2
-        p.emoji((start + 6.5, 300), "🌙", 13)
-        p.text((start + 21, 300), label, 13, fg, "semibold", "lm")
-    else:
-        p.button(box, label, False, hover == "dnd", icon="🌙")
-    hits.append(("dnd", box))
+    buttons = [
+        ("break_now", "☕", f"{data.get('break_len_min', 5):g} min break"),
+        ("open_break", "🧘", "Open break"),
+        ("dnd", "🌙", "DND on" if dnd_on else "DND"),
+    ]
+    size = 12.5
+    while True:
+        widths = [p.textlen(lbl, size, "semibold") + size + 8 + 22 for _, _, lbl in buttons]
+        if sum(widths) + 8 * (len(buttons) - 1) <= LR - L or size <= 10:
+            break
+        size -= 0.5
+    x0 = L
+    for (bid, icon, label), w in zip(buttons, widths):
+        box = (x0, 284, x0 + w, 316)
+        if bid == "dnd" and dnd_on:
+            bg, fg = TAGS["purple"]
+            p.rrect(box, 6, fill=lerp(bg, fg, 0.12) if hover == "dnd" else bg)
+            tw = p.textlen(label, size, "semibold")
+            start = (box[0] + box[2]) / 2 - (tw + size + 8) / 2
+            p.emoji((start + size / 2, 300), icon, size)
+            p.text((start + size + 8, 300), label, size, fg, "semibold", "lm")
+        else:
+            p.button(box, label, False, hover == bid, icon=icon, size=size)
+        hits.append((bid, box))
+        x0 = box[2] + 8
 
     p.hline(L, LR, 334)
     p.text((L, 358), "Today", 16, T["text"], "semibold", "lm")
@@ -392,7 +405,7 @@ def _overview(p, data, hover, hits):
     p.text((R1, 134), "Today", 12, T["dim"], anchor="rm")
     p.hline(R0, R1, 152)
     apps = data["apps"][:5]
-    top = apps[0][1] if apps else 1
+    top = max(apps[0][1], 1e-9) if apps else 1
     for i in range(5):
         y0 = 152 + i * 34
         cy = y0 + 17
@@ -525,10 +538,11 @@ POPUP_W = 380
 _POPUP_ICONS = {"break": "☕", "warn": "⚠️", "limit": "⏰"}
 
 
-def render_popup(kind, title, message, buttons, hover, out_scale):
+def render_popup(kind, title, message, buttons, hover, out_scale, key=None):
     """buttons: list of (id, label, primary). Returns (image, hits) with hits in output pixels."""
     T = THEME
-    p = Painter(POPUP_W, 400, out_scale * 2, T["key"])
+    key = tuple(key or T["key"])
+    p = Painter(POPUP_W, 400, out_scale * 2, key)
     lines = p.wrap(message, 12.5, POPUP_W - 56 - 22)
     msg_top = 56
     btn_y0 = msg_top + len(lines) * 19 + 12
@@ -560,7 +574,7 @@ def render_popup(kind, title, message, buttons, hover, out_scale):
 
     img = p.img.crop((0, 0, round(POPUP_W * p.S), round(H * p.S)))
     out = img.resize((round(POPUP_W * out_scale), round(H * out_scale)), Image.LANCZOS)
-    flat = Image.new("RGB", out.size, T["key"])
+    flat = Image.new("RGB", out.size, key)
     flat.paste(out, (0, 0), out)
     hits = [(bid, tuple(v * out_scale for v in box)) for bid, box in hits]
     return flat, hits
@@ -581,6 +595,43 @@ BREAK_TIPS = [
 ]
 
 
+def _tip_callout(p, tip):
+    T = THEME
+    lines = p.wrap(tip, 13.5, BREAK_W - 150)[:2]
+    ch = 24 + 20 * len(lines)
+    top = 380
+    p.rrect((60, top, BREAK_W - 60, top + ch), 6, fill=T["card_hi"])
+    p.emoji((86, top + 22), "💡", 16)
+    for i, ln in enumerate(lines):
+        p.text((108, top + 22 + i * 20), ln, 13.5, T["text"], anchor="lm")
+
+
+def render_open_break(elapsed, suggested, tip, hover, out_scale):
+    """Open (untimed) break: a stopwatch that counts up until you click "I'm back"."""
+    T = THEME
+    p = Painter(BREAK_W, BREAK_H, out_scale * 2, T["bg"])
+    cx = BREAK_W / 2
+    p.emoji((cx, 62), "🧘", 54)
+    p.text((cx, 138), "Open break", 30, T["text"], "bold", "mm")
+    p.text((cx, 172), "Take as long as you need · come back when you're ready", 14, T["muted"], anchor="mm")
+    p.text((cx, 254), fmt_clock(elapsed), 80, T["text"], "light", "mm")
+    if suggested and elapsed >= suggested:
+        label = f"{fmt_dur(suggested)} reached · good break"
+        w = p.textlen(label, 12.5) + 16
+        bg, fg = TAGS["green"]
+        p.rrect((cx - w / 2, 312, cx + w / 2, 334), 4, fill=bg)
+        p.text((cx, 323), label, 12.5, fg, anchor="mm")
+    else:
+        p.text((cx, 323), f"Away for {fmt_clock(elapsed)}"
+               + (f" · {fmt_dur(suggested)} recommended" if suggested else ""), 12.5, T["muted"], anchor="mm")
+    _tip_callout(p, tip)
+    label = "I'm back"
+    w = Painter.button_width(p, label, 13.5) + 20
+    box = (cx - w / 2, 486, cx + w / 2, 522)
+    p.button(box, label, True, hover == "back", size=13.5)
+    return p.result(out_scale), [("back", tuple(v * out_scale for v in box))]
+
+
 def render_break(remaining, total, tip, done, hover, out_scale, breaks_today=None):
     """Centre panel of the break overlay, drawn on the page background.
     Returns (image, hits) with hits in output pixels relative to the image."""
@@ -593,7 +644,7 @@ def render_break(remaining, total, tip, done, hover, out_scale, breaks_today=Non
     if done:
         sub = "Welcome back"
         if breaks_today:
-            nth = {1: "1st", 2: "2nd", 3: "3rd"}.get(breaks_today, f"{breaks_today}th")
+            nth = ordinal(breaks_today)
             sub = f"Welcome back · your {nth} break today"
     else:
         sub = "Step away from the screen for a bit"
@@ -602,20 +653,13 @@ def render_break(remaining, total, tip, done, hover, out_scale, breaks_today=Non
     if done:
         p.text((cx, 254), "Nice.", 72, T["text"], "bold", "mm")
         p.bar(130, BREAK_W - 130, 322, 1, T["good"], h=6)
-        p.text((cx, 344), f"{round(total / 60)} min break done", 12.5, T["muted"], anchor="mm")
+        p.text((cx, 344), f"{fmt_dur(total)} break done", 12.5, T["muted"], anchor="mm")
     else:
         p.text((cx, 254), fmt_clock(remaining), 80, T["text"], "light", "mm")
         p.bar(130, BREAK_W - 130, 322, 1 - (remaining / total if total else 0), T["a1"], h=6)
         p.text((cx, 344), f"{fmt_clock(total - remaining)} of {fmt_clock(total)}", 12.5, T["muted"], anchor="mm")
 
-    # tip callout
-    lines = p.wrap(tip, 13.5, BREAK_W - 150)[:2]
-    ch = 24 + 20 * len(lines)
-    top = 380
-    p.rrect((60, top, BREAK_W - 60, top + ch), 6, fill=T["card_hi"])
-    p.emoji((86, top + 22), "💡", 16)
-    for i, ln in enumerate(lines):
-        p.text((108, top + 22 + i * 20), ln, 13.5, T["text"], anchor="lm")
+    _tip_callout(p, tip)
 
     if done:
         bid, label, primary = "finish", "Back to work", True

@@ -17,6 +17,7 @@ import ctypes
 import ctypes.wintypes as wt
 import datetime as dt
 import json
+import math
 import os
 import queue
 import random
@@ -51,7 +52,9 @@ DEFAULT_CONFIG = {
 THEMES = ("system", "light", "dark")
 
 TICK_MS = 1000  # 1 s so the "Break in" countdown ticks smoothly
-SAVE_EVERY_SEC = 60
+SAVE_EVERY_SEC = 30
+POPUP_TIMEOUT_SEC = 300  # an unanswered popup snoozes itself after 5 minutes
+MIN_OPEN_BREAK_SEC = 10  # an open break shorter than this was probably a misclick
 KEEP_DAYS = 60
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -61,6 +64,10 @@ kernel32.GetTickCount.restype = wt.DWORD
 user32.GetForegroundWindow.restype = wt.HWND
 user32.GetParent.restype = wt.HWND
 user32.GetParent.argtypes = [wt.HWND]
+user32.OpenInputDesktop.restype = wt.HANDLE
+user32.OpenInputDesktop.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+user32.CloseDesktop.argtypes = [wt.HANDLE]
+user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
 
 
 # --------------------------------------------------------------------------- #
@@ -79,16 +86,58 @@ def idle_seconds() -> float:
     return millis / 1000.0
 
 
+kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+
+
+def uptime() -> float:
+    """Seconds since boot. Unlike time.time() it ignores clock changes, and unlike
+    time.monotonic() it is guaranteed to keep counting while the PC sleeps."""
+    return kernel32.GetTickCount64() / 1000.0
+
+
+def session_locked() -> bool:
+    """True while Windows is locked (the lock screen owns the input desktop)."""
+    desk = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
+    if not desk:
+        return True
+    user32.CloseDesktop(desk)
+    return False
+
+
+def _window_pid(hwnd) -> int:
+    pid = wt.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+_ENUM_PROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+
+def _uwp_child_pid(hwnd, frame_pid) -> int:
+    """Store (UWP) apps run inside ApplicationFrameHost; the real app is a child window."""
+    found = []
+
+    def cb(child, _):
+        pid = _window_pid(child)
+        if pid and pid != frame_pid:
+            found.append(pid)
+            return False
+        return True
+    user32.EnumChildWindows(hwnd, _ENUM_PROC(cb), 0)
+    return found[0] if found else frame_pid
+
+
 def foreground_app() -> str:
     hwnd = user32.GetForegroundWindow()
     if not hwnd:
         return "Desktop"
-    pid = wt.DWORD()
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    if pid.value == os.getpid():
+    pid = _window_pid(hwnd)
+    if pid == os.getpid():
         return "Screen Balance"
     try:
-        name = psutil.Process(pid.value).name()
+        name = psutil.Process(pid).name()
+        if name.lower() == "applicationframehost.exe":
+            name = psutil.Process(_uwp_child_pid(hwnd, pid)).name()
     except (psutil.Error, ValueError):
         return "Unknown"
     if name.lower().endswith(".exe"):
@@ -192,24 +241,36 @@ def set_autostart(enabled: bool) -> None:
 # --------------------------------------------------------------------------- #
 # Storage
 # --------------------------------------------------------------------------- #
+class UnreadableFile(Exception):
+    """The file exists but can't be opened right now (locked by antivirus, backup, ...)."""
+
+
 def load_json(path, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-        raise ValueError("not a JSON object")
-    except FileNotFoundError:
-        return default
-    except (OSError, ValueError) as e:
-        # keep the damaged file instead of silently overwriting the user's history
-        backup = f"{path}.corrupt-{dt.datetime.now():%Y%m%d-%H%M%S}"
+    """Read a JSON object. Missing file -> default. Damaged JSON -> kept aside as a backup,
+    default returned. Locked file -> retried, then UnreadableFile (never treated as damaged,
+    so a temporary lock can't wipe your history)."""
+    last_err = None
+    for attempt in range(5):
         try:
-            os.replace(path, backup)
-        except OSError:
-            pass
-        log_error(f"Could not read {path} ({e}); moved it to {backup}")
-        return default
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            raise ValueError("not a JSON object")
+        except FileNotFoundError:
+            return default
+        except ValueError as e:
+            backup = f"{path}.corrupt-{dt.datetime.now():%Y%m%d-%H%M%S}"
+            try:
+                os.replace(path, backup)
+            except OSError:
+                pass
+            log_error(f"Could not read {path} ({e}); moved it to {backup}")
+            return default
+        except OSError as e:
+            last_err = e
+            time.sleep(0.3 * (attempt + 1))
+    raise UnreadableFile(f"{path}: {last_err}")
 
 
 # key: (lowest, highest, is_float)
@@ -266,6 +327,34 @@ def clean_usage(raw: dict) -> dict:
     return out
 
 
+def merge_usage(base: dict, extra: dict) -> dict:
+    """Add the days/times tracked in `extra` onto `base` (used after a locked-file startup)."""
+    out = {k: dict(v, apps=dict(v["apps"]), hours=dict(v["hours"])) for k, v in base.items()}
+    for day, rec in extra.items():
+        cur = out.setdefault(day, {"total": 0.0, "apps": {}, "hours": {}, "breaks": 0,
+                                   "break_sec": 0.0, "longest": 0.0})
+        cur["total"] += rec.get("total", 0.0)
+        for k in ("apps", "hours"):
+            for name, secs in rec.get(k, {}).items():
+                cur[k][name] = cur[k].get(name, 0.0) + secs
+        cur["breaks"] += rec.get("breaks", 0)
+        cur["break_sec"] += rec.get("break_sec", 0.0)
+        cur["longest"] = max(cur.get("longest", 0.0), rec.get("longest", 0.0))
+        if rec.get("first") and (not cur.get("first") or _hm(rec["first"]) < _hm(cur["first"])):
+            cur["first"] = rec["first"]
+        if rec.get("last") and (not cur.get("last") or _hm(rec["last"]) > _hm(cur["last"])):
+            cur["last"] = rec["last"]
+    return out
+
+
+def _hm(stamp: str) -> int:
+    try:
+        h, m = stamp.split(":")
+        return int(h) * 60 + int(m)
+    except ValueError:
+        return 0
+
+
 def save_json(path, data):
     os.makedirs(DATA_DIR, exist_ok=True)
     tmp = path + ".tmp"
@@ -295,12 +384,130 @@ def flat_button(parent, text, command, primary=False, width=None):
 
 
 # --------------------------------------------------------------------------- #
+# Background rendering
+# --------------------------------------------------------------------------- #
+class RenderWorker:
+    """Draws images with Pillow on a background thread so the UI thread never stalls.
+
+    Each screen submits under its own key; a newer request replaces one that hasn't
+    started yet, so the worker only ever draws the latest state. Finished images are
+    handed back to the Tk thread (which alone may touch Tk) by polling at ~120 fps
+    while work is in flight, and not at all when idle."""
+
+    def __init__(self, root):
+        self.root = root
+        self._jobs = {}              # key -> (fn, args, callback)
+        self._busy = 0
+        self._cv = threading.Condition()
+        self._results = queue.Queue()
+        self._polling = False
+        threading.Thread(target=self._run, daemon=True, name="render").start()
+
+    def submit(self, key, fn, args, callback):
+        with self._cv:
+            self._jobs[key] = (fn, args, callback)
+            self._cv.notify()
+        if not self._polling:
+            self._polling = True
+            self.root.after(8, self._poll)
+
+    def cancel(self, key):
+        with self._cv:
+            self._jobs.pop(key, None)
+
+    def _run(self):
+        while True:
+            with self._cv:
+                while not self._jobs:
+                    self._cv.wait()
+                key = next(iter(self._jobs))
+                fn, args, callback = self._jobs.pop(key)
+                self._busy += 1
+            try:
+                result = fn(*args)
+            except Exception:
+                log_error(f"render {key!r} failed:\n{traceback.format_exc()}")
+                result = None
+            with self._cv:
+                self._busy -= 1
+            if result is not None:
+                self._results.put((key, callback, result))
+
+    def _poll(self):
+        delivered = {}
+        try:
+            while True:
+                key, callback, result = self._results.get_nowait()
+                delivered[key] = (callback, result)   # only the newest per screen matters
+        except queue.Empty:
+            pass
+        for callback, result in delivered.values():
+            try:
+                callback(result)
+            except Exception:
+                log_error(f"applying a render failed:\n{traceback.format_exc()}")
+        with self._cv:
+            pending = bool(self._jobs) or self._busy > 0
+        if pending or not self._results.empty():
+            self.root.after(8, self._poll)
+        else:
+            self._polling = False
+
+
+class FastTimer:
+    """Windows' timer normally fires every ~15.6 ms, capping animations at ~64 fps.
+    While an animation plays we ask for 1 ms resolution (~120 fps), then give it back
+    straight away so it doesn't cost battery the rest of the time."""
+
+    _users = 0
+
+    @classmethod
+    def acquire(cls):
+        if cls._users == 0:
+            try:
+                ctypes.WinDLL("winmm").timeBeginPeriod(1)
+            except OSError:
+                pass
+        cls._users += 1
+
+    @classmethod
+    def release(cls):
+        if cls._users <= 0:
+            return
+        cls._users -= 1
+        if cls._users == 0:
+            try:
+                ctypes.WinDLL("winmm").timeEndPeriod(1)
+            except OSError:
+                pass
+
+
+def ms_to_next_second(origin=None):
+    """Delay (ms) until the next whole second (of the wall clock, or since `origin` on
+    the uptime clock), so 1-second clocks tick on the boundary instead of drifting."""
+    frac = (time.time() if origin is None else uptime() - origin) % 1.0
+    return max(1, int((1.0 - frac) * 1000) + 3)
+
+
+# --------------------------------------------------------------------------- #
 # App
 # --------------------------------------------------------------------------- #
 class ScreenBalance:
     def __init__(self):
-        self.config = clean_config(load_json(CONFIG_PATH, {}))
-        self.usage = clean_usage(load_json(USAGE_PATH, {}))
+        try:
+            self.config = clean_config(load_json(CONFIG_PATH, {}))
+        except UnreadableFile as e:
+            log_error(f"settings unreadable, using defaults for now: {e}")
+            self.config = clean_config({})
+        # if usage.json is locked at startup, keep tracking in memory and merge into the
+        # file once it can be read again, instead of overwriting the history
+        self._usage_pending_merge = False
+        try:
+            self.usage = clean_usage(load_json(USAGE_PATH, {}))
+        except UnreadableFile as e:
+            log_error(f"history unreadable for now, will merge later: {e}")
+            self.usage = {}
+            self._usage_pending_merge = True
         self._prune_usage()
         self._last_day = today_key()
 
@@ -312,15 +519,17 @@ class ScreenBalance:
         self.current_app = ""
         self.is_idle = False
 
-        self._last_tick = time.monotonic()
-        self._last_wall = time.time()
+        self._last_tick = uptime()
         self._prev_idle = 0.0
+        self._away_logged = False
+        self._menu_sig = None
         self._dash_tab = "overview"
         self._dash_hover = None
         self._dash_hits = []
-        self._last_save = time.monotonic()
+        self._last_save = uptime()
         self._popup = None
         self._break_win = None
+        self._break_open = False
         self._stats_win = None
         self._settings_win = None
         self._tray_key = None
@@ -332,11 +541,30 @@ class ScreenBalance:
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title(APP_NAME)
+        self.root.report_callback_exception = self._report_tk_error
+        # Windows shutdown / log off: save before the process is ended
+        self.root.protocol("WM_SAVE_YOURSELF", self._save_safely)
         self.scale = self.root.winfo_fpixels("1i") / 96.0
+        self.renderer = RenderWorker(self.root)
 
         self._dark_taskbar = taskbar_is_dark()
         self.icon = pystray.Icon(APP_NAME, design.render_tray(0, False, self._dark_taskbar), APP_NAME,
                                  self._build_menu())
+
+    def _heal_windows(self):
+        """If a window vanished behind our back (e.g. Alt+F4), forget it so nothing stays stuck."""
+        for attr in ("_popup", "_break_win", "_stats_win", "_settings_win"):
+            w = getattr(self, attr)
+            try:
+                alive = w is not None and bool(w.winfo_exists())
+            except tk.TclError:
+                alive = False
+            if w is not None and not alive:
+                setattr(self, attr, None)
+
+    def _report_tk_error(self, exc, val, tb):
+        # pythonw has no console: send errors from Tk callbacks to the log instead of nowhere
+        log_error("UI callback failed:" + os.linesep + "".join(traceback.format_exception(exc, val, tb)))
 
     # ---------------- theme ----------------
     def _wants_dark(self) -> bool:
@@ -382,7 +610,23 @@ class ScreenBalance:
         day["break_sec"] += seconds
 
     def save(self):
+        if self._usage_pending_merge:
+            try:
+                on_disk = clean_usage(load_json(USAGE_PATH, {}))
+            except UnreadableFile:
+                return  # still locked: try again at the next save, never overwrite blindly
+            self.usage = merge_usage(on_disk, self.usage)
+            self._usage_pending_merge = False
         save_json(USAGE_PATH, self.usage)
+
+    def _save_safely(self):
+        """Save without ever raising (a locked file must not stall the clock or block Quit)."""
+        try:
+            self.save()
+            return True
+        except Exception:
+            log_error("saving failed (will retry):" + os.linesep + traceback.format_exc())
+            return False
 
     def _limit_sec(self):
         return self.config["daily_limit_hours"] * 3600
@@ -392,11 +636,13 @@ class ScreenBalance:
         post = lambda cmd: (lambda icon, item: self.cmd_q.put(cmd))
         return pystray.Menu(
             pystray.MenuItem(lambda item: f"Today: {fmt_dur(self._day()['total'])}", post("stats"), default=True),
-            pystray.MenuItem(lambda item: self._break_in_text(), None, enabled=False),
+            pystray.MenuItem(lambda item: self._break_in_text(precise=False), None, enabled=False),
             pystray.MenuItem(lambda item: f"Since last break: {fmt_dur(self.session_sec)}", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open dashboard", post("stats")),
-            pystray.MenuItem("Take a break now", post("break_now")),
+            pystray.MenuItem(lambda item: f"Take a {self.config['break_length_min']:g}-min break",
+                             post("break_now")),
+            pystray.MenuItem("Take an open break (until I'm back)", post("open_break")),
             pystray.MenuItem(
                 lambda item: f"Do not disturb ({self._dnd_label()})" if self._dnd_active() else "Do not disturb",
                 pystray.Menu(
@@ -422,7 +668,10 @@ class ScreenBalance:
 
     def _load_dnd(self):
         """Do not disturb survives restarts until its end time."""
-        raw = load_json(self._state_path(), {}).get("dnd_until", 0)
+        try:
+            raw = load_json(self._state_path(), {}).get("dnd_until", 0)
+        except UnreadableFile:
+            return 0.0
         if raw == "forever":
             return float("inf")
         try:
@@ -485,13 +734,19 @@ class ScreenBalance:
             return None
         return self.next_break_at - self.session_sec
 
-    def _break_in_text(self):
+    def _break_in_text(self, precise=True):
+        """precise: 'Break in: 12:34' (tooltip, dashboard). Otherwise minutes only, for the
+        tray menu, which Windows has to rebuild every time its text changes."""
         if self._break_win is not None:
-            return "On a break"
+            return "On an open break" if self._break_open else "On a break"
         if self._dnd_active():
             return f"Do not disturb {self._dnd_label()}"
         left = self._break_in()
-        return f"Break in: {design.fmt_clock(left)}" if left > 0 else "Break in: now"
+        if left <= 0:
+            return "Break in: now"
+        if precise:
+            return f"Break in: {design.fmt_clock(left)}"
+        return f"Break in: {math.ceil(left / 60)} min" if left > 60 else "Break in: under a minute"
 
     def _update_tray(self):
         total = self._day()["total"]
@@ -506,13 +761,20 @@ class ScreenBalance:
         limit_txt = f" / {fmt_dur(limit)}" if limit else ""
         self.icon.title = (f"Screen Balance\n{self._break_in_text()}\n"
                            f"Today: {fmt_dur(total)}{limit_txt} ({status})")[:127]
-        self.icon.update_menu()
+        # rebuild the tray menu only when something in it changed: rebuilding every second
+        # could close or glitch the menu while you have it open
+        dnd = self._dnd_active()
+        sig = (self._break_in_text(precise=False), fmt_dur(self.session_sec), fmt_dur(total),
+               dnd, self._dnd_label() if dnd else "", self.config["break_length_min"])
+        if sig != self._menu_sig:
+            self._menu_sig = sig
+            self.icon.update_menu()
 
     # ---------------- main loop ----------------
     def run(self):
         threading.Thread(target=self.icon.run, daemon=True).start()
-        self.root.after(200, self._poll_commands)
-        self.root.after(1000, self._tick)
+        self.root.after(50, self._poll_commands)
+        self.root.after(ms_to_next_second(), self._tick)
         self.root.mainloop()
 
     def _poll_commands(self):
@@ -525,7 +787,7 @@ class ScreenBalance:
                     log_error(f"command {cmd!r} failed:\n{traceback.format_exc()}")
         except queue.Empty:
             pass
-        self.root.after(200, self._poll_commands)
+        self.root.after(50, self._poll_commands)  # tray clicks feel instant
 
     def _tick(self):
         # always reschedule, so one unexpected error can never stop tracking for good
@@ -533,17 +795,18 @@ class ScreenBalance:
             self._tick_inner()
         except Exception:
             log_error(f"tick failed:\n{traceback.format_exc()}")
-        self.root.after(TICK_MS, self._tick)
+        # land on the next whole second, so the countdowns never stutter or skip a number
+        self.root.after(ms_to_next_second(), self._tick)
 
     def _tick_inner(self):
-        now = time.monotonic()
-        wall = time.time()
-        gap = max(now - self._last_tick, wall - self._last_wall)
+        now = uptime()
+        gap = now - self._last_tick
         elapsed = gap if gap <= 30 else 0  # a big gap means sleep/hibernate, not screen time
-        self._last_tick, self._last_wall = now, wall
+        self._last_tick = now
+        self._heal_windows()
 
         # follow Windows switching between light and dark (checked every few seconds)
-        if now - self._theme_checked >= 3:
+        if now - self._theme_checked >= 3 or now < self._theme_checked:
             self._theme_checked = now
             self._dark_taskbar = taskbar_is_dark()   # the tray icon tile follows the taskbar
             if self.config.get("theme") == "system":
@@ -554,10 +817,12 @@ class ScreenBalance:
             self._prune_usage()
 
         idle = idle_seconds()
-        self.is_idle = idle >= self.config["idle_threshold_sec"]
+        break_len = self.config["break_length_min"] * 60
+        # stop counting at the idle threshold, and never past the break length (otherwise the
+        # same minutes would count as screen time AND as a break); a locked PC never counts
+        self.is_idle = (idle >= min(self.config["idle_threshold_sec"], break_len)) or session_locked()
 
         # a long enough idle stretch (or the PC sleeping that long) counts as a break
-        break_len = self.config["break_length_min"] * 60
         if (idle >= break_len or gap >= break_len) and self.session_sec > 0:
             self.session_sec = 0
             self.break_count += 1
@@ -567,15 +832,22 @@ class ScreenBalance:
         if self._break_win is None:
             if gap >= break_len:
                 self._record_break(gap)
+                # after waking, idle still includes the sleep until you type your PIN:
+                # don't log that same away stretch a second time
+                self._away_logged = True
             elif self._prev_idle >= break_len and idle < self._prev_idle:
-                self._record_break(self._prev_idle)
+                if not self._away_logged:
+                    self._record_break(self._prev_idle)
+                self._away_logged = False
+            elif idle < break_len:
+                self._away_logged = False
             self._prev_idle = idle
         else:
             self._prev_idle = 0.0
 
         if self._break_win is not None:
             pass  # on a break: nothing counts as screen time
-        elif not self.is_idle:
+        elif not self.is_idle and elapsed > 0:
             app = foreground_app()
             self.current_app = app
             day = self._day()
@@ -593,7 +865,7 @@ class ScreenBalance:
             self._check_limit()
 
         if now - self._last_save >= SAVE_EVERY_SEC:
-            self.save()
+            self._save_safely()
             self._last_save = now
 
         self._update_tray()
@@ -653,7 +925,8 @@ class ScreenBalance:
         self._popup = win
         win.overrideredirect(True)
         win.attributes("-topmost", True)
-        key = hexc(design.popup_key())
+        key_rgb = design.popup_key()          # fixed for this popup, even if the theme flips
+        key = hexc(key_rgb)
         win.configure(bg=key)
         win.attributes("-transparentcolor", key)
         win.attributes("-alpha", 0.0)
@@ -661,13 +934,23 @@ class ScreenBalance:
         canvas.pack()
         state = {"hover": None, "hits": [], "photo": None}
 
-        def draw():
-            img, hits = design.render_popup(kind, title, message, buttons, state["hover"], self.scale)
+        item = canvas.create_image(0, 0, anchor="nw")
+
+        def apply(result):
+            if self._popup is not win or not win.winfo_exists():
+                return
+            img, hits = result
             state["photo"] = ImageTk.PhotoImage(img)
             state["hits"] = hits
             canvas.config(width=img.width, height=img.height)
-            canvas.delete("all")
-            canvas.create_image(0, 0, image=state["photo"], anchor="nw")
+            canvas.itemconfig(item, image=state["photo"])
+
+        def draw(sync=False):
+            args = (kind, title, message, buttons, state["hover"], self.scale, key_rgb)
+            if sync:   # first frame: needed right away to size and place the window
+                apply(design.render_popup(*args))
+            else:      # hover changes: drawn in the background, UI stays fluid
+                self.renderer.submit("popup", design.render_popup, args, apply)
 
         def hit(x, y):
             for bid, (x0, y0, x1, y1) in state["hits"]:
@@ -690,7 +973,10 @@ class ScreenBalance:
         breaks_at_open = self.break_count
 
         def close(action="close"):
+            if self._popup is not win:
+                return
             self._popup = None
+            self.renderer.cancel("popup")
             win.destroy()
             if kind == "break" and action == "ok":
                 self._start_break()
@@ -707,8 +993,11 @@ class ScreenBalance:
         canvas.bind("<Motion>", on_move)
         canvas.bind("<Leave>", on_leave)
         canvas.bind("<Button-1>", on_click)
+        win.protocol("WM_DELETE_WINDOW", close)          # Alt+F4 acts like the close button
+        # an ignored popup must not block every later reminder: it quietly snoozes itself
+        win.after(POPUP_TIMEOUT_SEC * 1000, close)
 
-        draw()
+        draw(sync=True)
         win.update_idletasks()
         w, h = canvas.winfo_reqwidth(), canvas.winfo_reqheight()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
@@ -716,23 +1005,34 @@ class ScreenBalance:
         y_end = sh - h - round(64 * self.scale)
         slide = round(24 * self.scale)
 
-        def animate(step=0, frames=14):
-            t = step / frames
-            ease = 1 - (1 - t) ** 3
-            if not win.winfo_exists():
+        began = time.perf_counter()
+        duration = 0.24
+
+        def animate():
+            # time-based easing: a late frame catches up instead of slowing the slide down
+            if self._popup is not win or not win.winfo_exists():
+                FastTimer.release()
                 return
+            t = min(1.0, (time.perf_counter() - began) / duration)
+            ease = 1 - (1 - t) ** 3
             win.geometry(f"+{x}+{round(y_end + slide * (1 - ease))}")
-            win.attributes("-alpha", 0.98 * ease)
-            if step < frames:
-                win.after(16, animate, step + 1, frames)
+            win.attributes("-alpha", ease)
+            if t < 1.0:
+                win.after(8, animate)
+            else:
+                FastTimer.release()
 
         win.geometry(f"+{x}+{y_end + slide}")
+        FastTimer.acquire()
         animate()
         win.bell()
 
     # ---------------- full-screen break timer ----------------
-    def _start_break(self):
-        """Dim every screen and show a countdown on top of everything until the break is over."""
+    def _start_break(self, open_ended=False):
+        """Cover every screen, on top of everything, until the break is over.
+
+        Timed break: counts down from the break length, then waits for "Back to work".
+        Open break (open_ended=True): counts up until you click "I'm back"."""
         if self._break_win is not None:
             return
         if self._popup is not None:
@@ -740,7 +1040,7 @@ class ScreenBalance:
             self._popup = None
 
         total = self.config["break_length_min"] * 60
-        started = time.monotonic()
+        started = uptime()             # keeps counting while asleep, ignores clock changes
         end_at = started + total
         tip_offset = random.randrange(len(design.BREAK_TIPS))
 
@@ -754,30 +1054,50 @@ class ScreenBalance:
         bg = hexc(THEME["bg"])
         win = tk.Toplevel(self.root)
         self._break_win = win
+        self._break_open = open_ended
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.attributes("-alpha", 0.0)
         win.configure(bg=bg, cursor="arrow")
+        win.maxsize(vw, vh)                     # allow spanning every monitor
         win.geometry(f"{vw}x{vh}+{vx}+{vy}")
         canvas = tk.Canvas(win, width=vw, height=vh, bg=bg, highlightthickness=0, bd=0)
         canvas.pack()
         px, py = -vx + sw // 2, -vy + sh // 2   # main monitor centre, in canvas coords
         item = canvas.create_image(px, py, anchor="center")
-        state = {"hover": None, "hits": [], "photo": None, "done": False, "origin": (0, 0)}
+        state = {"hover": None, "hits": [], "photo": None, "done": False}
+        breaks_next = self._day()["breaks"] + 1   # "your 3rd break today"
 
-        def draw():
-            remaining = max(0.0, end_at - time.monotonic())
-            if state["done"]:
-                tip = "Your eyes, back and mind will thank you."
-            else:
-                elapsed = total - remaining
-                tip = design.BREAK_TIPS[(tip_offset + int(elapsed // 20)) % len(design.BREAK_TIPS)]
-            img, hits = design.render_break(remaining, total, tip, state["done"], state["hover"], self.scale,
-                                            breaks_today=self._day()["breaks"] + 1)
+        def apply(result):
+            if self._break_win is not win:
+                return
+            img, hits = result
+            # follow a light/dark switch that happens mid-break
+            page = hexc(THEME["bg"])
+            if canvas.cget("bg") != page:
+                win.configure(bg=page)
+                canvas.configure(bg=page)
             state["photo"] = ImageTk.PhotoImage(img)
             canvas.itemconfig(item, image=state["photo"])
             ox, oy = px - img.width // 2, py - img.height // 2
             state["hits"] = [(bid, (x0 + ox, y0 + oy, x1 + ox, y1 + oy)) for bid, (x0, y0, x1, y1) in hits]
+
+        def draw(sync=False):
+            now = uptime()
+            elapsed = max(0.0, now - started)
+            tip = design.BREAK_TIPS[(tip_offset + int(elapsed // 20)) % len(design.BREAK_TIPS)]
+            if open_ended:
+                fn, args = design.render_open_break, (elapsed, total, tip, state["hover"], self.scale)
+            else:
+                remaining = max(0.0, end_at - now)
+                if state["done"]:
+                    tip = "Your eyes, back and mind will thank you."
+                fn = lambda *a: design.render_break(*a, breaks_today=breaks_next)
+                args = (remaining, total, tip, state["done"], state["hover"], self.scale)
+            if sync:
+                apply(fn(*args))
+            else:   # drawn in the background so the countdown and hover never stutter
+                self.renderer.submit("break", fn, args, apply)
 
         def hit(x, y):
             for bid, (x0, y0, x1, y1) in state["hits"]:
@@ -792,55 +1112,77 @@ class ScreenBalance:
                 canvas.config(cursor="hand2" if h else "arrow")
                 draw()
 
-        def finish(completed):
+        def finish(action):
             if self._break_win is not win:
                 return
             self._break_win = None
-            if completed:
-                self._record_break(time.monotonic() - started)
-                self.session_sec = 0
-                self.break_count += 1
-                self.next_break_at = self.config["break_interval_min"] * 60
-            else:
+            took = max(0.0, uptime() - started)
+            if action == "skip":
+                # ended a timed break early: acts like a snooze, not a break
                 self.next_break_at = self.session_sec + self.config["snooze_min"] * 60
+            elif action == "back" and took < MIN_OPEN_BREAK_SEC:
+                pass  # opened by mistake: nothing to record
+            else:
+                self._record_break(took)
+                if action == "finish" or took >= total:
+                    # a full break: start a fresh stretch
+                    self.session_sec = 0
+                    self.break_count += 1
+                    self.next_break_at = self.config["break_interval_min"] * 60
+            self._prev_idle = 0.0
+            self.renderer.cancel("break")
             win.destroy()
             self._update_tray()
+            if self._stats_win is not None:
+                self._refresh_stats()
 
         def on_click(e):
             action = hit(e.x, e.y)
-            if action == "skip":
-                finish(False)
-            elif action == "finish":
-                finish(True)
+            if action in ("skip", "finish", "back"):
+                finish(action)
 
         def loop():
             if self._break_win is not win:
                 return
-            if not state["done"] and time.monotonic() >= end_at:
+            if not open_ended and not state["done"] and uptime() >= end_at:
                 state["done"] = True
                 win.bell()
             draw()
             # stay above anything that tried to come to the front
             win.attributes("-topmost", True)
             win.lift()
-            win.after(1000, loop)
+            # next update exactly when the clock's second changes (no drift, no skipped numbers)
+            win.after(ms_to_next_second(started), loop)
 
-        def fade(step=0, frames=16):
+        fade_began = time.perf_counter()
+
+        def fade():
             if self._break_win is not win:
+                FastTimer.release()
                 return
-            win.attributes("-alpha", 1.0 if step >= frames else (1 - (1 - step / frames) ** 3))
-            if step < frames:
-                win.after(16, fade, step + 1, frames)
+            t = min(1.0, (time.perf_counter() - fade_began) / 0.28)   # time-based, not frame-based
+            win.attributes("-alpha", 1 - (1 - t) ** 3)
+            if t < 1.0:
+                win.after(8, fade)
+            else:
+                FastTimer.release()
 
         canvas.bind("<Motion>", on_move)
         canvas.bind("<Button-1>", on_click)
-        draw()
+        # Alt+F4 ends the break the same way the on-screen button would
+        win.protocol("WM_DELETE_WINDOW",
+                     lambda: finish("back" if open_ended else ("finish" if state["done"] else "skip")))
+        draw(sync=True)
         win.focus_force()
+        FastTimer.acquire()
         fade()
-        win.after(1000, loop)
+        win.after(ms_to_next_second(started), loop)
 
     def _cmd_break_now(self):
         self._start_break()
+
+    def _cmd_open_break(self):
+        self._start_break(open_ended=True)
 
     # ---------------- dashboard ----------------
     def _dash_data(self):
@@ -921,9 +1263,9 @@ class ScreenBalance:
             if h and h.startswith("tab_"):
                 self._dash_tab = h[4:]
                 self._refresh_stats()
-            elif h == "break_now":
+            elif h in ("break_now", "open_break"):
                 self._dash_hover = None
-                self._start_break()
+                self._start_break(open_ended=(h == "open_break"))
                 self._refresh_stats()
             elif h == "dnd":
                 # dashboard button: 1 hour of quiet, or switch it off if it's on
@@ -935,20 +1277,30 @@ class ScreenBalance:
 
         def on_close():
             self._stats_win = None
+            self.renderer.cancel("dash")
             win.destroy()
         win.protocol("WM_DELETE_WINDOW", on_close)
-        self._refresh_stats()
+        self._refresh_stats(sync=True)
         style_titlebar(win)
         win.lift()
         win.focus_force()
 
-    def _refresh_stats(self):
+    def _refresh_stats(self, sync=False):
         win = self._stats_win
         if win is None or not win.winfo_exists():
             self._stats_win = None
             return
-        img, self._dash_hits = design.render_dashboard(self._dash_data(), self.scale,
-                                                       hover=self._dash_hover, tab=self._dash_tab)
+        args = (self._dash_data(), self.scale, self._dash_hover, self._dash_tab)
+        if sync:   # first frame when the window opens, so it appears at full size at once
+            self._apply_stats(design.render_dashboard(*args))
+        else:      # every later frame (ticks, hover, tabs) is drawn in the background
+            self.renderer.submit("dash", design.render_dashboard, args, self._apply_stats)
+
+    def _apply_stats(self, result):
+        win = self._stats_win
+        if win is None or not win.winfo_exists():
+            return
+        img, self._dash_hits = result
         self._stats_photo = ImageTk.PhotoImage(img)
         self._stats_label.config(image=self._stats_photo)
 
@@ -1081,13 +1433,20 @@ class ScreenBalance:
                 v = values[key]
                 self.config[key] = v if key == "daily_limit_hours" else int(v)
             self.config["theme"] = theme["mode"]
-            save_json(CONFIG_PATH, self.config)
+            try:
+                save_json(CONFIG_PATH, self.config)
+            except OSError:
+                log_error("could not save settings:" + os.linesep + traceback.format_exc())
             self.apply_theme()
             if self.config["break_interval_min"] != old_interval:
                 # new interval applies to the current session; if already past it, remind in a minute
                 self.next_break_at = max(self.config["break_interval_min"] * 60, self.session_sec + 60)
             if auto["on"] != autostart_enabled():
-                set_autostart(auto["on"])
+                try:
+                    set_autostart(auto["on"])
+                except OSError:
+                    log_error("could not change Start with Windows:" + os.linesep + traceback.format_exc())
+            self._menu_sig = None
             self.limit_notices.pop(today_key(), None)
             self._tray_key = None
             self._update_tray()
@@ -1107,12 +1466,15 @@ class ScreenBalance:
     # ---------------- other commands ----------------
     def _cmd_toggle_autostart(self):
         set_autostart(not autostart_enabled())
+        self._menu_sig = None
         self.icon.update_menu()
 
     def _cmd_quit(self):
-        self.save()
-        self.icon.stop()
-        self.root.quit()
+        self._save_safely()
+        try:
+            self.icon.stop()
+        finally:
+            self.root.quit()
 
 
 def main():
@@ -1131,8 +1493,13 @@ def main():
     try:
         app.run()
     finally:
-        app.save()
+        app._save_safely()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # pythonw has no console: make sure a startup crash leaves a trace
+        log_error("Screen Balance crashed:" + os.linesep + traceback.format_exc())
+        raise
