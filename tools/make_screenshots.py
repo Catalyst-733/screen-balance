@@ -90,11 +90,13 @@ def main():
     img, _ = design.render_break(187, 300, design.BREAK_TIPS[1], False, None, SCALE)
     img.save(os.path.join(OUT, "break-timer.png"))
 
-    icons = [design.render_tray(r, p) for r, p in ((0.35, False), (0.85, False), (1.1, False), (0.5, True))]
-    strip = Image.new("RGBA", (64 * 4 + 24 * 3, 64), (0, 0, 0, 0))
-    for i, ic in enumerate(icons):
-        strip.paste(ic, (i * 88, 0), ic)
-    strip.save(os.path.join(OUT, "tray-icons.png"))
+    states = ((0.35, False), (0.85, False), (1.1, False), (0.5, True))
+    for dark, name in ((False, "tray-icons.png"), (True, "tray-icons-dark.png")):
+        strip = Image.new("RGBA", (64 * 4 + 24 * 3, 64), (0, 0, 0, 0))
+        for i, (r, dnd) in enumerate(states):
+            ic = design.render_tray(r, dnd, dark_taskbar=dark)
+            strip.paste(ic, (i * 88, 0), ic)
+        strip.save(os.path.join(OUT, name))
 
     # dark versions (the README shows them to people using GitHub's dark theme)
     design.set_theme(True)

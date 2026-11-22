@@ -119,15 +119,24 @@ def log_error(msg: str) -> None:
         pass
 
 
-def windows_uses_dark_mode() -> bool:
-    """True when Windows' app mode is set to Dark (Settings > Personalization > Colors)."""
+def _personalize_flag(name: str, default: int = 1) -> int:
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                             r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
-            return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+            return winreg.QueryValueEx(k, name)[0]
     except OSError:
-        return False
+        return default
+
+
+def windows_uses_dark_mode() -> bool:
+    """True when Windows' app mode is set to Dark (Settings > Personalization > Colors)."""
+    return _personalize_flag("AppsUseLightTheme") == 0
+
+
+def taskbar_is_dark() -> bool:
+    """True when the taskbar uses the dark Windows mode (it can differ from the app mode)."""
+    return _personalize_flag("SystemUsesLightTheme", 0) == 0
 
 
 def style_titlebar(win):
@@ -298,7 +307,7 @@ class ScreenBalance:
         self.session_sec = 0.0            # continuous active time since last break
         self.break_count = 0              # bumps every time a real break is detected
         self.next_break_at = self.config["break_interval_min"] * 60
-        self.dnd_until = 0.0              # Do not disturb: 0 = off, inf = until turned off
+        self.dnd_until = self._load_dnd()  # Do not disturb: 0 = off, inf = until turned off
         self.limit_notices = {}           # date -> {"80": bool, "100": bool, "last": ts}
         self.current_app = ""
         self.is_idle = False
@@ -325,7 +334,9 @@ class ScreenBalance:
         self.root.title(APP_NAME)
         self.scale = self.root.winfo_fpixels("1i") / 96.0
 
-        self.icon = pystray.Icon(APP_NAME, design.render_tray(0), APP_NAME, self._build_menu())
+        self._dark_taskbar = taskbar_is_dark()
+        self.icon = pystray.Icon(APP_NAME, design.render_tray(0, False, self._dark_taskbar), APP_NAME,
+                                 self._build_menu())
 
     # ---------------- theme ----------------
     def _wants_dark(self) -> bool:
@@ -405,6 +416,28 @@ class ScreenBalance:
         )
 
     # ---------------- do not disturb ----------------
+    @staticmethod
+    def _state_path():
+        return os.path.join(DATA_DIR, "state.json")
+
+    def _load_dnd(self):
+        """Do not disturb survives restarts until its end time."""
+        raw = load_json(self._state_path(), {}).get("dnd_until", 0)
+        if raw == "forever":
+            return float("inf")
+        try:
+            until = float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+        return until if until > time.time() else 0.0
+
+    def _save_dnd(self):
+        value = "forever" if self.dnd_until == float("inf") else self.dnd_until
+        try:
+            save_json(self._state_path(), {"dnd_until": value})
+        except OSError:
+            log_error("could not save Do not disturb state:\n" + traceback.format_exc())
+
     def _dnd_active(self):
         return time.time() < self.dnd_until
 
@@ -425,6 +458,7 @@ class ScreenBalance:
             if self._popup is not None:
                 self._popup.destroy()
                 self._popup = None
+        self._save_dnd()
         self._tray_key = None
         self._update_tray()
         if self._stats_win is not None:
@@ -464,10 +498,10 @@ class ScreenBalance:
         limit = self._limit_sec()
         ratio = total / limit if limit else 0
         paused = self._dnd_active()
-        key = (round(ratio, 2), paused)
+        key = (round(ratio, 2), paused, self._dark_taskbar)
         if key != self._tray_key:      # only re-render when it visibly changes
             self._tray_key = key
-            self.icon.icon = design.render_tray(ratio, paused)
+            self.icon.icon = design.render_tray(ratio, paused, self._dark_taskbar)
         status = "idle" if self.is_idle else "active"
         limit_txt = f" / {fmt_dur(limit)}" if limit else ""
         self.icon.title = (f"Screen Balance\n{self._break_in_text()}\n"
@@ -509,9 +543,11 @@ class ScreenBalance:
         self._last_tick, self._last_wall = now, wall
 
         # follow Windows switching between light and dark (checked every few seconds)
-        if self.config.get("theme") == "system" and now - self._theme_checked >= 3:
+        if now - self._theme_checked >= 3:
             self._theme_checked = now
-            self.apply_theme()
+            self._dark_taskbar = taskbar_is_dark()   # the tray icon tile follows the taskbar
+            if self.config.get("theme") == "system":
+                self.apply_theme()
 
         if today_key() != self._last_day:   # midnight: drop old history, keep running
             self._last_day = today_key()
