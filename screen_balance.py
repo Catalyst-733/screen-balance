@@ -46,7 +46,9 @@ DEFAULT_CONFIG = {
     "daily_limit_hours": 6.0,
     "idle_threshold_sec": 120,  # no input for this long = not counting time
     "over_limit_repeat_min": 30,
+    "theme": "system",          # "system" (follow Windows), "light" or "dark"
 }
+THEMES = ("system", "light", "dark")
 
 TICK_MS = 1000  # 1 s so the "Break in" countdown ticks smoothly
 SAVE_EVERY_SEC = 60
@@ -117,13 +119,24 @@ def log_error(msg: str) -> None:
         pass
 
 
+def windows_uses_dark_mode() -> bool:
+    """True when Windows' app mode is set to Dark (Settings > Personalization > Colors)."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+    except OSError:
+        return False
+
+
 def style_titlebar(win):
-    """Windows 11 light title bar matching the app's white pages."""
+    """Windows 11 title bar matching the current page color (light or dark)."""
     try:
         win.update_idletasks()
         hwnd = user32.GetParent(win.winfo_id())
-        off = ctypes.c_int(0)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(off), 4)
+        dark = ctypes.c_int(1 if THEME["dark"] else 0)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), 4)
         r, g, b = THEME["bg"]
         color = ctypes.c_int(r | (g << 8) | (b << 16))
         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(color), 4)
@@ -213,6 +226,8 @@ def clean_config(raw: dict) -> dict:
             continue
         v = max(lo, min(hi, v))
         cfg[key] = v if is_float else int(v)
+    if raw.get("theme") in THEMES:
+        cfg["theme"] = raw["theme"]
     return cfg
 
 
@@ -300,6 +315,8 @@ class ScreenBalance:
         self._stats_win = None
         self._settings_win = None
         self._tray_key = None
+        self._theme_checked = 0.0
+        self.apply_theme()
 
         self.cmd_q = queue.Queue()
 
@@ -309,6 +326,25 @@ class ScreenBalance:
         self.scale = self.root.winfo_fpixels("1i") / 96.0
 
         self.icon = pystray.Icon(APP_NAME, design.render_tray(0), APP_NAME, self._build_menu())
+
+    # ---------------- theme ----------------
+    def _wants_dark(self) -> bool:
+        mode = self.config.get("theme", "system")
+        return windows_uses_dark_mode() if mode == "system" else mode == "dark"
+
+    def apply_theme(self) -> bool:
+        """Switch the palette if needed. Returns True when it changed."""
+        dark = self._wants_dark()
+        if THEME.get("dark") == dark:
+            return False
+        design.set_theme(dark)
+        win = getattr(self, "_stats_win", None)
+        if win is not None and win.winfo_exists():
+            win.configure(bg=hexc(THEME["bg"]))
+            self._stats_label.configure(bg=hexc(THEME["bg"]))
+            style_titlebar(win)
+            self._refresh_stats()
+        return True
 
     # ---------------- data ----------------
     def _prune_usage(self):
@@ -427,6 +463,11 @@ class ScreenBalance:
         elapsed = gap if gap <= 30 else 0  # a big gap means sleep/hibernate, not screen time
         self._last_tick, self._last_wall = now, wall
 
+        # follow Windows switching between light and dark (checked every few seconds)
+        if self.config.get("theme") == "system" and now - self._theme_checked >= 3:
+            self._theme_checked = now
+            self.apply_theme()
+
         if today_key() != self._last_day:   # midnight: drop old history, keep running
             self._last_day = today_key()
             self._prune_usage()
@@ -531,7 +572,7 @@ class ScreenBalance:
         self._popup = win
         win.overrideredirect(True)
         win.attributes("-topmost", True)
-        key = hexc(design.POPUP_KEY)
+        key = hexc(design.popup_key())
         win.configure(bg=key)
         win.attributes("-transparentcolor", key)
         win.attributes("-alpha", 0.0)
@@ -897,6 +938,33 @@ class ScreenBalance:
                 else:
                     b.pack(side="left")
 
+        # appearance: System / Light / Dark
+        theme = {"mode": self.config.get("theme", "system")}
+        look_row = tk.Frame(outer, bg=bg, pady=12)
+        look_row.pack(fill="x")
+        look_text = tk.Frame(look_row, bg=bg)
+        look_text.pack(side="left")
+        tk.Label(look_text, text="Appearance", bg=bg, fg=hexc(T["text"]), font=("Segoe UI", 10)).pack(anchor="w")
+        tk.Label(look_text, text="System follows your Windows light/dark setting", bg=bg, fg=hexc(T["muted"]),
+                 font=("Segoe UI", 9)).pack(anchor="w")
+        seg = tk.Frame(look_row, bg=bg, highlightthickness=1, highlightbackground=hexc(T["border_hi"]))
+        seg.pack(side="right")
+        seg_btns = {}
+
+        def draw_seg():
+            for mode, lbl in seg_btns.items():
+                on = mode == theme["mode"]
+                lbl.config(bg=hexc(T["card_hi"]) if on else bg, fg=hexc(T["text"] if on else T["muted"]),
+                           font=("Segoe UI Semibold" if on else "Segoe UI", 9))
+
+        for mode in THEMES:
+            lbl = tk.Label(seg, text=mode.capitalize(), bg=bg, cursor="hand2", padx=10, pady=3)
+            lbl.pack(side="left")
+            lbl.bind("<Button-1>", lambda e, m=mode: (theme.update(mode=m), draw_seg()))
+            seg_btns[mode] = lbl
+        draw_seg()
+        tk.Frame(outer, bg=hexc(T["border"]), height=1).pack(fill="x")
+
         # autostart toggle
         auto_row = tk.Frame(outer, bg=bg, pady=14)
         auto_row.pack(fill="x")
@@ -927,7 +995,9 @@ class ScreenBalance:
             for key, *_ in fields:
                 v = values[key]
                 self.config[key] = v if key == "daily_limit_hours" else int(v)
+            self.config["theme"] = theme["mode"]
             save_json(CONFIG_PATH, self.config)
+            self.apply_theme()
             if self.config["break_interval_min"] != old_interval:
                 # new interval applies to the current session; if already past it, remind in a minute
                 self.next_break_at = max(self.config["break_interval_min"] * 60, self.session_sec + 60)

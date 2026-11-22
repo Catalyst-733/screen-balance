@@ -39,19 +39,22 @@ DEMO = dict(
 def save_popup(name, img):
     # popups are flattened onto a color key for transparency; turn that into real alpha
     rgb = img.convert("RGB")
-    diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, design.POPUP_KEY))
+    diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, design.popup_key()))
     alpha = diff.convert("L").point(lambda v: 255 if v else 0)
     rgba = rgb.convert("RGBA")
     rgba.putalpha(alpha)
     rgba.save(os.path.join(OUT, name))
 
 
-def settings_shot():
+def settings_shot(theme, name):
+    import json
     import screen_balance as sb
     tmp = tempfile.mkdtemp()
     sb.DATA_DIR = tmp
     sb.CONFIG_PATH = os.path.join(tmp, "config.json")
     sb.USAGE_PATH = os.path.join(tmp, "usage.json")
+    with open(sb.CONFIG_PATH, "w") as f:
+        json.dump({"theme": theme}, f)
     app = sb.ScreenBalance()
     sb.autostart_enabled = lambda: True  # show the toggle switched on
     app._cmd_settings()
@@ -61,12 +64,13 @@ def settings_shot():
     win.update()
     x, y = win.winfo_rootx(), win.winfo_rooty()
     ImageGrab.grab((x, y, x + win.winfo_width(), y + win.winfo_height()), all_screens=True) \
-        .save(os.path.join(OUT, "settings.png"))
+        .save(os.path.join(OUT, name))
     app.root.destroy()
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
+    design.set_theme(False)
     design.render_dashboard(DEMO, SCALE, tab="overview")[0].save(os.path.join(OUT, "dashboard.png"))
     design.render_dashboard(DEMO, SCALE, tab="analytics")[0].save(os.path.join(OUT, "analytics.png"))
     img, _ = design.render_break(0, 300, "Your eyes, back and mind will thank you.", True, None, SCALE,
@@ -92,7 +96,16 @@ def main():
         strip.paste(ic, (i * 88, 0), ic)
     strip.save(os.path.join(OUT, "tray-icons.png"))
 
-    settings_shot()
+    # dark versions (the README shows them to people using GitHub's dark theme)
+    design.set_theme(True)
+    design.render_dashboard(DEMO, SCALE, tab="overview")[0].save(os.path.join(OUT, "dashboard-dark.png"))
+    design.render_dashboard(DEMO, SCALE, tab="analytics")[0].save(os.path.join(OUT, "analytics-dark.png"))
+    img, _ = design.render_break(187, 300, design.BREAK_TIPS[1], False, None, SCALE)
+    img.save(os.path.join(OUT, "break-timer-dark.png"))
+    design.set_theme(False)
+
+    settings_shot("light", "settings.png")
+    settings_shot("dark", "settings-dark.png")
     print("Saved images to", OUT)
 
 
