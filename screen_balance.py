@@ -117,13 +117,13 @@ def log_error(msg: str) -> None:
         pass
 
 
-def dark_titlebar(win):
-    """Windows 11 dark title bar matching the app background."""
+def style_titlebar(win):
+    """Windows 11 light title bar matching the app's white pages."""
     try:
         win.update_idletasks()
         hwnd = user32.GetParent(win.winfo_id())
-        on = ctypes.c_int(1)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(on), 4)
+        off = ctypes.c_int(0)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(off), 4)
         r, g, b = THEME["bg"]
         color = ctypes.c_int(r | (g << 8) | (b << 16))
         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(color), 4)
@@ -224,7 +224,19 @@ def clean_usage(raw: dict) -> dict:
         try:
             dt.date.fromisoformat(day)
             apps = {str(k): float(v) for k, v in (rec.get("apps") or {}).items()}
-            out[day] = {"total": float(rec.get("total", 0)), "apps": apps}
+            hours = {str(int(k)): float(v) for k, v in (rec.get("hours") or {}).items() if 0 <= int(k) < 24}
+            entry = {
+                "total": float(rec.get("total", 0)),
+                "apps": apps,
+                "hours": hours,
+                "breaks": int(rec.get("breaks", 0)),
+                "break_sec": float(rec.get("break_sec", 0)),
+                "longest": float(rec.get("longest", 0)),
+            }
+            for k in ("first", "last"):
+                if isinstance(rec.get(k), str):
+                    entry[k] = rec[k][:5]
+            out[day] = entry
         except (TypeError, ValueError, AttributeError):
             continue
     return out
@@ -246,11 +258,12 @@ def today_key() -> str:
 # Small dark-themed Tk widgets
 # --------------------------------------------------------------------------- #
 def flat_button(parent, text, command, primary=False, width=None):
-    bg = THEME["a1"] if primary else THEME["card_hi"]
-    fg = THEME["bg"] if primary else THEME["text"]
-    hover = design.lerp(bg, (255, 255, 255), 0.15) if primary else THEME["border"]
+    bg = THEME["a1"] if primary else THEME["bg"]
+    fg = (255, 255, 255) if primary else THEME["text"]
+    hover = THEME["a1_hover"] if primary else THEME["card_hi"]
     b = tk.Label(parent, text=text, bg=hexc(bg), fg=hexc(fg), cursor="hand2",
-                 font=("Segoe UI Semibold", 10), padx=16, pady=6, width=width)
+                 font=("Segoe UI Semibold", 10), padx=16, pady=5, width=width,
+                 highlightthickness=0 if primary else 1, highlightbackground=hexc(THEME["border_hi"]))
     b.bind("<Enter>", lambda e: b.config(bg=hexc(hover)))
     b.bind("<Leave>", lambda e: b.config(bg=hexc(bg)))
     b.bind("<Button-1>", lambda e: command())
@@ -277,6 +290,10 @@ class ScreenBalance:
 
         self._last_tick = time.monotonic()
         self._last_wall = time.time()
+        self._prev_idle = 0.0
+        self._dash_tab = "overview"
+        self._dash_hover = None
+        self._dash_hits = []
         self._last_save = time.monotonic()
         self._popup = None
         self._break_win = None
@@ -300,7 +317,22 @@ class ScreenBalance:
             del self.usage[k]
 
     def _day(self, key=None):
-        return self.usage.setdefault(key or today_key(), {"total": 0.0, "apps": {}})
+        day = self.usage.setdefault(key or today_key(), {})
+        day.setdefault("total", 0.0)
+        day.setdefault("apps", {})
+        day.setdefault("hours", {})
+        day.setdefault("breaks", 0)
+        day.setdefault("break_sec", 0.0)
+        day.setdefault("longest", 0.0)
+        return day
+
+    def _record_break(self, seconds):
+        """Count a finished break (timer, stepping away, or the PC sleeping)."""
+        if seconds <= 0:
+            return
+        day = self._day()
+        day["breaks"] += 1
+        day["break_sec"] += seconds
 
     def save(self):
         save_json(USAGE_PATH, self.usage)
@@ -409,6 +441,16 @@ class ScreenBalance:
             self.break_count += 1
             self.next_break_at = self.config["break_interval_min"] * 60
 
+        # log breaks taken by stepping away (counted once you come back) or by sleeping the PC
+        if self._break_win is None:
+            if gap >= break_len:
+                self._record_break(gap)
+            elif self._prev_idle >= break_len and idle < self._prev_idle:
+                self._record_break(self._prev_idle)
+            self._prev_idle = idle
+        else:
+            self._prev_idle = 0.0
+
         if self._break_win is not None:
             pass  # on a break: nothing counts as screen time
         elif not self.is_idle:
@@ -417,7 +459,14 @@ class ScreenBalance:
             day = self._day()
             day["total"] += elapsed
             day["apps"][app] = day["apps"].get(app, 0.0) + elapsed
+            clock = dt.datetime.now()
+            hour = str(clock.hour)
+            day["hours"][hour] = day["hours"].get(hour, 0.0) + elapsed
+            stamp = f"{clock.hour}:{clock.minute:02d}"
+            day.setdefault("first", stamp)
+            day["last"] = stamp
             self.session_sec += elapsed
+            day["longest"] = max(day["longest"], self.session_sec)
             self._check_break()
             self._check_limit()
 
@@ -569,7 +618,8 @@ class ScreenBalance:
             self._popup = None
 
         total = self.config["break_length_min"] * 60
-        end_at = time.monotonic() + total
+        started = time.monotonic()
+        end_at = started + total
         tip_offset = random.randrange(len(design.BREAK_TIPS))
 
         # cover the whole virtual desktop (all monitors), centre the timer on the main one
@@ -600,7 +650,8 @@ class ScreenBalance:
             else:
                 elapsed = total - remaining
                 tip = design.BREAK_TIPS[(tip_offset + int(elapsed // 20)) % len(design.BREAK_TIPS)]
-            img, hits = design.render_break(remaining, total, tip, state["done"], state["hover"], self.scale)
+            img, hits = design.render_break(remaining, total, tip, state["done"], state["hover"], self.scale,
+                                            breaks_today=self._day()["breaks"] + 1)
             state["photo"] = ImageTk.PhotoImage(img)
             canvas.itemconfig(item, image=state["photo"])
             ox, oy = px - img.width // 2, py - img.height // 2
@@ -624,6 +675,7 @@ class ScreenBalance:
                 return
             self._break_win = None
             if completed:
+                self._record_break(time.monotonic() - started)
                 self.session_sec = 0
                 self.break_count += 1
                 self.next_break_at = self.config["break_interval_min"] * 60
@@ -654,7 +706,7 @@ class ScreenBalance:
         def fade(step=0, frames=16):
             if self._break_win is not win:
                 return
-            win.attributes("-alpha", 0.96 * (1 - (1 - step / frames) ** 3))
+            win.attributes("-alpha", 1.0 if step >= frames else (1 - (1 - step / frames) ** 3))
             if step < frames:
                 win.after(16, fade, step + 1, frames)
 
@@ -675,7 +727,15 @@ class ScreenBalance:
         week = []
         for i in range(6, -1, -1):
             d = today - dt.timedelta(days=i)
-            week.append((d.strftime("%a"), self.usage.get(d.isoformat(), {}).get("total", 0.0), i == 0))
+            rec = self.usage.get(d.isoformat(), {})
+            week.append({
+                "label": d.strftime("%a"),
+                "total": rec.get("total", 0.0),
+                "breaks": rec.get("breaks", 0),
+                "break_sec": rec.get("break_sec", 0.0),
+                "longest": rec.get("longest", 0.0),
+                "today": i == 0,
+            })
         if self._reminders_paused():
             state = "paused"
         elif self.is_idle:
@@ -687,12 +747,18 @@ class ScreenBalance:
             "limit": self._limit_sec(),
             "session": self.session_sec,
             "break_in": self._break_in(),
-            "interval": self.config["break_interval_min"] * 60,
             "apps": sorted(day["apps"].items(), key=lambda kv: kv[1], reverse=True),
             "week": week,
             "date_str": today.strftime("%A, %B %d").replace(" 0", " "),
             "state": state,
             "current_app": self.current_app or "—",
+            "break_len_min": self.config["break_length_min"],
+            "breaks": day["breaks"],
+            "break_sec": day["break_sec"],
+            "longest": day["longest"],
+            "first": day.get("first"),
+            "hours": [day["hours"].get(str(h), 0.0) for h in range(24)],
+            "hour_now": dt.datetime.now().hour,
         }
 
     def _cmd_stats(self):
@@ -709,12 +775,44 @@ class ScreenBalance:
         self._stats_label = tk.Label(win, bg=hexc(THEME["bg"]), bd=0)
         self._stats_label.pack()
 
+        def dash_hit(x, y):
+            for bid, (x0, y0, x1, y1) in self._dash_hits:
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    return bid
+            return None
+
+        def on_move(e):
+            h = dash_hit(e.x, e.y)
+            if h != self._dash_hover:
+                self._dash_hover = h
+                self._stats_label.config(cursor="hand2" if h else "")
+                self._refresh_stats()
+
+        def on_leave(_):
+            if self._dash_hover:
+                self._dash_hover = None
+                self._refresh_stats()
+
+        def on_click(e):
+            h = dash_hit(e.x, e.y)
+            if h and h.startswith("tab_"):
+                self._dash_tab = h[4:]
+                self._refresh_stats()
+            elif h == "break_now":
+                self._dash_hover = None
+                self._start_break()
+                self._refresh_stats()
+
+        self._stats_label.bind("<Motion>", on_move)
+        self._stats_label.bind("<Leave>", on_leave)
+        self._stats_label.bind("<Button-1>", on_click)
+
         def on_close():
             self._stats_win = None
             win.destroy()
         win.protocol("WM_DELETE_WINDOW", on_close)
         self._refresh_stats()
-        dark_titlebar(win)
+        style_titlebar(win)
         win.lift()
         win.focus_force()
 
@@ -723,7 +821,8 @@ class ScreenBalance:
         if win is None or not win.winfo_exists():
             self._stats_win = None
             return
-        img = design.render_dashboard(self._dash_data(), self.scale)
+        img, self._dash_hits = design.render_dashboard(self._dash_data(), self.scale,
+                                                       hover=self._dash_hover, tab=self._dash_tab)
         self._stats_photo = ImageTk.PhotoImage(img)
         self._stats_label.config(image=self._stats_photo)
 
@@ -734,19 +833,20 @@ class ScreenBalance:
             self._settings_win.focus_force()
             return
         T = THEME
-        bg, card = hexc(T["bg"]), hexc(T["card"])
+        bg = hexc(T["bg"])
+        card = bg  # Notion style: rows sit directly on the white page, split by thin lines
         win = tk.Toplevel(self.root)
         self._settings_win = win
         win.title("Screen Balance — Settings")
         win.configure(bg=bg)
         win.resizable(False, False)
 
-        outer = tk.Frame(win, bg=bg, padx=22, pady=18)
+        outer = tk.Frame(win, bg=bg, padx=28, pady=22)
         outer.pack(fill="both", expand=True)
         tk.Label(outer, text="Settings", bg=bg, fg=hexc(T["text"]),
-                 font=("Segoe UI Semibold", 17)).pack(anchor="w")
+                 font=("Segoe UI", 20, "bold")).pack(anchor="w")
         tk.Label(outer, text="Tune how Screen Balance keeps you in check.", bg=bg, fg=hexc(T["muted"]),
-                 font=("Segoe UI", 10)).pack(anchor="w", pady=(0, 12))
+                 font=("Segoe UI", 10)).pack(anchor="w", pady=(0, 14))
 
         # key, title, hint, lo, hi, step, unit
         fields = [
@@ -762,22 +862,22 @@ class ScreenBalance:
         def fmt(key, v, unit):
             return f"{v:g} {unit}"
 
-        card_frame = tk.Frame(outer, bg=card, highlightbackground=hexc(T["border"]), highlightthickness=1)
+        card_frame = tk.Frame(outer, bg=card)
         card_frame.pack(fill="x")
+        tk.Frame(card_frame, bg=hexc(T["border"]), height=1).pack(fill="x")
         for i, (key, title, hint, lo, hi, step, unit) in enumerate(fields):
-            row = tk.Frame(card_frame, bg=card, padx=16, pady=10)
+            row = tk.Frame(card_frame, bg=card, padx=2, pady=10)
             row.pack(fill="x")
-            if i:
-                tk.Frame(card_frame, bg=hexc(T["border"]), height=1).pack(fill="x", before=row)
+            tk.Frame(card_frame, bg=hexc(T["border"]), height=1).pack(fill="x")
             text = tk.Frame(row, bg=card)
             text.pack(side="left", fill="x", expand=True)
-            tk.Label(text, text=title, bg=card, fg=hexc(T["text"]), font=("Segoe UI Semibold", 10)).pack(anchor="w")
+            tk.Label(text, text=title, bg=card, fg=hexc(T["text"]), font=("Segoe UI", 10)).pack(anchor="w")
             tk.Label(text, text=hint, bg=card, fg=hexc(T["muted"]), font=("Segoe UI", 9)).pack(anchor="w")
 
-            stepper = tk.Frame(row, bg=hexc(T["card_hi"]))
+            stepper = tk.Frame(row, bg=bg, highlightthickness=1, highlightbackground=hexc(T["border_hi"]))
             stepper.pack(side="right", padx=(16, 0))
-            val_lbl = tk.Label(stepper, text=fmt(key, values[key], unit), width=8, bg=hexc(T["card_hi"]),
-                               fg=hexc(T["text"]), font=("Segoe UI Semibold", 10))
+            val_lbl = tk.Label(stepper, text=fmt(key, values[key], unit), width=8, bg=bg,
+                               fg=hexc(T["text"]), font=("Segoe UI", 10))
 
             def make_step(key=key, lo=lo, hi=hi, step=step, unit=unit, lbl=val_lbl, sign=1):
                 def go():
@@ -786,11 +886,11 @@ class ScreenBalance:
                 return go
 
             for sign, sym in ((-1, "−"), (1, "+")):
-                b = tk.Label(stepper, text=sym, bg=hexc(T["card_hi"]), fg=hexc(T["a1"]), cursor="hand2",
-                             font=("Segoe UI Semibold", 12), width=2)
+                b = tk.Label(stepper, text=sym, bg=bg, fg=hexc(T["muted"]), cursor="hand2",
+                             font=("Segoe UI", 12), width=2)
                 b.bind("<Button-1>", lambda e, f=make_step(sign=sign): f())
-                b.bind("<Enter>", lambda e, b=b: b.config(bg=hexc(T["border"])))
-                b.bind("<Leave>", lambda e, b=b: b.config(bg=hexc(T["card_hi"])))
+                b.bind("<Enter>", lambda e, b=b: b.config(bg=hexc(T["card_hi"]), fg=hexc(T["text"])))
+                b.bind("<Leave>", lambda e, b=b: b.config(bg=bg, fg=hexc(T["muted"])))
                 if sign < 0:
                     b.pack(side="left")
                     val_lbl.pack(side="left")
@@ -798,23 +898,23 @@ class ScreenBalance:
                     b.pack(side="left")
 
         # autostart toggle
-        auto_row = tk.Frame(outer, bg=bg, pady=12)
+        auto_row = tk.Frame(outer, bg=bg, pady=14)
         auto_row.pack(fill="x")
         auto = {"on": autostart_enabled()}
         tk.Label(auto_row, text="Start with Windows", bg=bg, fg=hexc(T["text"]),
-                 font=("Segoe UI Semibold", 10)).pack(side="left")
-        toggle = tk.Canvas(auto_row, width=44, height=24, bg=bg, highlightthickness=0, cursor="hand2")
+                 font=("Segoe UI", 10)).pack(side="left")
+        toggle = tk.Canvas(auto_row, width=34, height=20, bg=bg, highlightthickness=0, cursor="hand2")
         toggle.pack(side="right")
 
         def draw_toggle():
             toggle.delete("all")
             on = auto["on"]
-            col = hexc(T["a1"]) if on else hexc(T["card_hi"])
-            toggle.create_oval(0, 0, 24, 24, fill=col, outline=col)
-            toggle.create_oval(20, 0, 44, 24, fill=col, outline=col)
-            toggle.create_rectangle(12, 0, 32, 24, fill=col, outline=col)
-            x = 22 if on else 2
-            toggle.create_oval(x, 2, x + 20, 22, fill="white", outline="white")
+            col = hexc(T["a1"]) if on else hexc(T["border_hi"])
+            toggle.create_oval(0, 0, 20, 20, fill=col, outline=col)
+            toggle.create_oval(14, 0, 34, 20, fill=col, outline=col)
+            toggle.create_rectangle(10, 0, 24, 20, fill=col, outline=col)
+            x = 16 if on else 2
+            toggle.create_oval(x, 2, x + 16, 18, fill="white", outline="white")
         toggle.bind("<Button-1>", lambda e: (auto.update(on=not auto["on"]), draw_toggle()))
         draw_toggle()
 
@@ -845,7 +945,7 @@ class ScreenBalance:
         flat_button(btns, "Save", save, primary=True).pack(side="right")
         flat_button(btns, "Cancel", close).pack(side="right", padx=(0, 8))
         win.protocol("WM_DELETE_WINDOW", close)
-        dark_titlebar(win)
+        style_titlebar(win)
         win.lift()
         win.focus_force()
 

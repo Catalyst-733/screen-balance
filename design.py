@@ -1,39 +1,55 @@
 """
-Rendering for Screen Balance.
+Rendering for Screen Balance, in a Notion-inspired style.
 
-Everything visual (dashboard, popups, tray icon) is drawn with Pillow at 2x the
-screen resolution and downsampled, which gives smooth anti-aliased rings,
-gradients and glows that plain Tk widgets can't do.
+Light pages, warm dark-gray text, thin borders, emoji icons, gray callouts and
+soft colored tags. Everything is drawn with Pillow at 2x the screen resolution
+and downsampled so text, rounded corners and emoji stay crisp.
 """
 
 import math
 import os
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
+# Notion-like palette
 THEME = {
-    "bg": (12, 14, 21),
-    "card": (21, 24, 34),
-    "card_hi": (31, 35, 49),
-    "track": (27, 31, 44),
-    "border": (36, 41, 57),
-    "text": (236, 238, 244),
-    "muted": (138, 144, 164),
-    "dim": (92, 98, 118),
-    "a1": (34, 211, 238),     # cyan
-    "a2": (167, 139, 250),    # violet
-    "good": (52, 211, 153),
-    "warn": (251, 191, 36),
-    "danger": (248, 113, 113),
+    "bg": (255, 255, 255),        # page
+    "card": (247, 247, 245),      # sidebar / soft panel
+    "card_hi": (241, 241, 239),   # callout, hover, stepper
+    "track": (237, 237, 235),     # empty progress
+    "border": (233, 233, 231),
+    "border_hi": (217, 217, 214),
+    "text": (55, 53, 47),
+    "muted": (120, 119, 116),
+    "dim": (165, 164, 161),
+    "a1": (35, 131, 226),         # Notion blue
+    "a1_hover": (0, 117, 222),
+    "good": (68, 131, 97),
+    "warn": (217, 115, 13),
+    "danger": (212, 76, 71),
 }
-APP_COLORS = [THEME["a1"], THEME["a2"], (96, 165, 250), (244, 114, 182), THEME["good"], THEME["warn"]]
-POPUP_KEY = (1, 2, 3)  # transparent color key for borderless popups
+
+# (background, text) pairs, like Notion's select tags
+TAGS = {
+    "gray": ((241, 241, 239), (120, 119, 116)),
+    "blue": ((231, 243, 248), (51, 126, 169)),
+    "green": ((237, 243, 236), (68, 131, 97)),
+    "orange": ((251, 236, 221), (217, 115, 13)),
+    "yellow": ((251, 243, 219), (203, 145, 47)),
+    "red": ((253, 235, 236), (212, 76, 71)),
+    "purple": ((246, 243, 249), (144, 101, 176)),
+    "pink": ((250, 241, 245), (193, 76, 138)),
+}
+APP_TAGS = ["blue", "purple", "green", "orange", "pink", "yellow"]
+POPUP_KEY = (250, 251, 252)  # transparent color key for borderless popups (never used in drawings)
 
 _FONT_FILES = {
     "regular": ["segoeui.ttf"],
     "semibold": ["seguisb.ttf", "segoeuib.ttf", "segoeui.ttf"],
     "bold": ["segoeuib.ttf", "segoeui.ttf"],
     "light": ["segoeuil.ttf", "segoeui.ttf"],
+    "symbol": ["seguisym.ttf", "segoeui.ttf"],
+    "emoji": ["seguiemj.ttf", "segoeui.ttf"],
 }
 _FONT_DIR = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
 _font_cache = {}
@@ -76,13 +92,12 @@ def fmt_clock(seconds):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def status_colors(ratio):
-    """Gradient pair for a usage ratio (0..1+)."""
+def usage_color(ratio):
     if ratio < 0.8:
-        return THEME["a1"], THEME["a2"]
+        return THEME["a1"]
     if ratio < 1:
-        return THEME["a2"], THEME["warn"]
-    return THEME["warn"], THEME["danger"]
+        return THEME["warn"]
+    return THEME["danger"]
 
 
 class Painter:
@@ -111,7 +126,10 @@ class Painter:
     def line(self, pts, fill, width=1):
         self.d.line([(x * self.S, y * self.S) for x, y in pts], fill=fill, width=max(1, round(width * self.S)))
 
-    def dashed(self, x0, x1, y, fill, dash=5, gap=4, width=1):
+    def hline(self, x0, x1, y, fill=None):
+        self.line([(x0, y), (x1, y)], fill or THEME["border"], 1)
+
+    def dashed(self, x0, x1, y, fill, dash=4, gap=4, width=1):
         x = x0
         while x < x1:
             self.line([(x, y), (min(x + dash, x1), y)], fill, width)
@@ -120,6 +138,10 @@ class Painter:
     def text(self, xy, txt, size, color, weight="regular", anchor="la"):
         self.d.text((xy[0] * self.S, xy[1] * self.S), txt, font=font(round(size * self.S), weight),
                     fill=color, anchor=anchor)
+
+    def emoji(self, xy, ch, size, anchor="mm"):
+        self.d.text((xy[0] * self.S, xy[1] * self.S), ch, font=font(round(size * self.S), "emoji"),
+                    anchor=anchor, embedded_color=True)
 
     def textlen(self, txt, size, weight="regular"):
         return font(round(size * self.S), weight).getlength(txt) / self.S
@@ -145,76 +167,40 @@ class Painter:
             lines.append(cur)
         return lines
 
-    def grad_rrect(self, box, r, c1, c2, vertical=False):
-        x0, y0, x1, y1 = (round(v * self.S) for v in box)
-        w, h = max(1, x1 - x0), max(1, y1 - y0)
-        g = Image.linear_gradient("L")
-        if not vertical:
-            g = g.rotate(90)  # left -> right
-        g = g.resize((w, h))
-        grad = Image.composite(Image.new("RGBA", (w, h), tuple(c2) + (255,)),
-                               Image.new("RGBA", (w, h), tuple(c1) + (255,)), g)
-        mask = Image.new("L", (w, h), 0)
-        rr = min(r * self.S, w / 2, h / 2)
-        ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=rr, fill=255)
-        self.img.paste(grad, (x0, y0), mask)
+    def tag(self, x, cy, label, color, size=12):
+        """Notion select-style pill. Returns its right edge."""
+        bg, fg = TAGS[color]
+        w = self.textlen(label, size) + 12
+        self.rrect((x, cy - 10, x + w, cy + 10), 4, fill=bg)
+        self.text((x + 6, cy), label, size, fg, anchor="lm")
+        return x + w
 
-    def glow_blob(self, c, r, color, alpha):
-        """Large soft light, rendered small and upscaled so it's cheap."""
-        k = 8
-        size = int((r * 3) * self.S / k) or 1
-        small = Image.new("RGBA", (size, size), tuple(color) + (0,))
-        ImageDraw.Draw(small).ellipse((size / 3, size / 3, size * 2 / 3, size * 2 / 3),
-                                      fill=tuple(color) + (alpha,))
-        small = small.filter(ImageFilter.GaussianBlur(size / 8))
-        big = small.resize((size * k, size * k), Image.BICUBIC)
-        x = round(c[0] * self.S - size * k / 2)
-        y = round(c[1] * self.S - size * k / 2)
-        self._composite(big, x, y)
+    def bar(self, x0, x1, cy, frac, color, h=6):
+        self.rrect((x0, cy - h / 2, x1, cy + h / 2), h / 2, fill=THEME["track"])
+        if frac > 0:
+            self.rrect((x0, cy - h / 2, x0 + max(h, (x1 - x0) * min(frac, 1)), cy + h / 2), h / 2, fill=color)
 
-    def _composite(self, layer, x, y):
-        # alpha_composite needs non-negative destinations, so crop as needed
-        cx, cy = max(0, -x), max(0, -y)
-        if cx or cy:
-            layer = layer.crop((cx, cy, layer.width, layer.height))
-        self.img.alpha_composite(layer, dest=(x + cx, y + cy))
+    def button(self, box, label, primary, hover, icon=None, size=13):
+        T = THEME
+        x0, y0, x1, y1 = box
+        if primary:
+            self.rrect(box, 6, fill=T["a1_hover"] if hover else T["a1"])
+            color = (255, 255, 255)
+        else:
+            self.rrect(box, 6, fill=T["card_hi"] if hover else T["bg"], outline=T["border_hi"])
+            color = T["text"]
+        cy = (y0 + y1) / 2
+        if icon:
+            tw = self.textlen(label, size, "semibold")
+            start = (x0 + x1) / 2 - (tw + size + 8) / 2
+            self.emoji((start + size / 2, cy), icon, size)
+            self.text((start + size + 8, cy), label, size, color, "semibold", "lm")
+        else:
+            self.text(((x0 + x1) / 2, cy), label, size, color, "semibold", "mm")
 
-    def ring(self, c, radius, thick, frac, c1, c2, track, glow=True):
-        S = self.S
-        pad = thick * 2
-        size = round((radius + pad) * 2 * S)
-        layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        d = ImageDraw.Draw(layer)
-        o = pad * S
-        box = (o, o, o + radius * 2 * S, o + radius * 2 * S)
-        w = round(thick * S)
-        d.arc(box, 0, 360, fill=tuple(track) + (255,), width=w)
-        ox = round(c[0] * S - size / 2)
-        oy = round(c[1] * S - size / 2)
-        self._composite(layer, ox, oy)
-
-        frac = max(0.0, min(1.0, frac))
-        if frac <= 0.002:
-            return
-        prog = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        d = ImageDraw.Draw(prog)
-        total = 360 * frac
-        steps = max(2, int(total / 1.5))
-        for i in range(steps):
-            a0 = -90 + total * i / steps
-            a1 = -90 + total * (i + 1) / steps + 0.6
-            d.arc(box, a0, min(a1, -90 + total), fill=lerp(c1, c2, i / (steps - 1)) + (255,), width=w)
-        mid = (radius - thick / 2) * S
-        cxl = cyl = size / 2
-        for ang, col in ((-90, c1), (-90 + total, c2)):
-            x = cxl + mid * math.cos(math.radians(ang))
-            y = cyl + mid * math.sin(math.radians(ang))
-            d.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill=tuple(col) + (255,))
-        if glow:
-            g = prog.filter(ImageFilter.GaussianBlur(thick * S * 0.9))
-            g.putalpha(g.getchannel("A").point(lambda v: int(v * 0.55)))
-            self._composite(g, ox, oy)
-        self._composite(prog, ox, oy)
+    @staticmethod
+    def button_width(p, label, size=13, icon=False):
+        return p.textlen(label, size, "semibold") + 28 + (size + 8 if icon else 0)
 
     def result(self, out_scale, w=None, h=None):
         size = (round((w or self.w) * out_scale), round((h or self.h) * out_scale))
@@ -222,213 +208,292 @@ class Painter:
 
 
 # --------------------------------------------------------------------------- #
-# Dashboard
+# Dashboard (a Notion-style page)
 # --------------------------------------------------------------------------- #
-DASH_W, DASH_H = 760, 440
+DASH_W, DASH_H = 780, 510
+L, LR, R0, R1 = 44, 372, 420, 736
 
 
-def render_dashboard(data, out_scale):
-    """data keys: total, limit, session, interval, apps[(name, secs)], week[(label, secs, is_today)],
-    date_str, state ('active'|'idle'|'paused'), current_app"""
+def render_dashboard(data, out_scale, hover=None, tab="overview"):
+    """A Notion-style page with two views (tabs).
+
+    data keys: total, limit, session, break_in, apps[(name, secs)], date_str, state, current_app,
+    break_len_min, breaks, break_sec, longest, first, hours[24],
+    week[dict(label, total, breaks, break_sec, longest, today)].
+    Returns (image, hits) with hits in output pixels."""
     T = THEME
     p = Painter(DASH_W, DASH_H, out_scale * 2, T["bg"])
+    hits = []
+
+    # header
+    p.emoji((L + 14, 42), "⏳", 26)
+    p.text((L + 38, 42), "Screen Balance", 24, T["text"], "bold", "lm")
+    p.text((R1, 44), data["date_str"], 13, T["muted"], anchor="rm")
+
+    # view tabs
+    x = L
+    for tid, glyph, label in (("overview", "▦", "Overview"), ("analytics", "◫", "Analytics")):
+        w = p.textlen(label, 13, "semibold") + 30
+        box = (x - 6, 72, x - 6 + w, 98)
+        active = tab == tid
+        if hover == f"tab_{tid}" and not active:
+            p.rrect(box, 4, fill=T["card_hi"])
+        col = T["text"] if active else T["muted"]
+        p.text((x + 3, 85), glyph, 12, col, "symbol", "mm")
+        p.text((x + 14, 85), label, 13, col, "semibold" if active else "regular", "lm")
+        if active:
+            p.line([(x - 6, 104), (x - 6 + w, 104)], T["text"], 2)
+        hits.append((f"tab_{tid}", box))
+        x += w + 8
+    p.hline(L, R1, 105)
+
+    if tab == "analytics":
+        _analytics(p, data)
+    else:
+        _overview(p, data, hover, hits)
+
+    hits = [(bid, tuple(v * out_scale for v in b)) for bid, b in hits]
+    return p.result(out_scale), hits
+
+
+def _overview(p, data, hover, hits):
+    T = THEME
     total, limit = data["total"], data["limit"]
     ratio = total / limit if limit else 0
 
-    p.glow_blob((180, 230), 150, T["a2"], 55)
-    p.glow_blob((120, 150), 110, T["a1"], 35)
+    def prop(cy, glyph, label):
+        p.text((L + 7, cy), glyph, 12.5, T["dim"], "symbol", "mm")
+        p.text((L + 22, cy), label, 13, T["muted"], anchor="lm")
+        return L + 140
 
-    # --- header
-    p.text((28, 36), "Screen Balance", 19, T["text"], "semibold", "lm")
-    p.text((28, 58), data["date_str"], 11.5, T["muted"], anchor="lm")
+    vx = prop(134, "◉", "Status")
     state = data["state"]
     if state == "paused":
-        dot, label = T["warn"], "Reminders paused"
+        p.tag(vx, 134, "Reminders paused", "yellow")
     elif state == "idle":
-        dot, label = T["dim"], "Idle — not counting"
+        p.tag(vx, 134, "Idle", "gray")
     else:
-        dot, label = T["good"], f"Active · {data['current_app']}"
-    label = p.fit(label, 11, "regular", 220)
-    pw = p.textlen(label, 11) + 34
-    p.rrect((28, 76, 28 + pw, 100), 12, fill=T["card"], outline=T["border"])
-    p.circle((43, 88), 4, fill=dot)
-    p.text((54, 88), label, 11, T["muted"], anchor="lm")
+        p.tag(vx, 134, p.fit(f"Active · {data['current_app']}", 12, "regular", LR - vx - 14), "green")
 
-    # --- big ring
-    c1, c2 = status_colors(ratio)
-    p.ring((180, 228), 92, 15, ratio if limit else 0, c1, c2, T["track"])
-    p.text((180, 196), f"{round(ratio * 100)}% of limit" if limit else "today", 11, T["dim"], anchor="mm")
-    p.text((180, 230), fmt_dur(total), 34, T["text"], "semibold", "mm")
-    p.text((180, 262), f"of {fmt_dur(limit)}" if limit else "no daily limit", 12, T["muted"], anchor="mm")
-
-    # --- chips
-    def chip(x0, x1, title, value, value_color, frac, fc1, fc2, sub=None, aside=None):
-        y0, y1 = 346, 412
-        p.rrect((x0, y0, x1, y1), 14, fill=T["card"], outline=T["border"])
-        p.text((x0 + 14, y0 + 17), title, 9.5, T["dim"], "semibold", "lm")
-        p.text((x0 + 14, y0 + 39), value, 18, value_color, "semibold", "lm")
-        if aside:
-            p.text((x1 - 14, y0 + 17), aside, 9.5, T["dim"], anchor="rm")
-        if frac is not None:
-            p.rrect((x0 + 14, y0 + 54, x1 - 14, y0 + 58), 2, fill=T["track"])
-            if frac > 0:
-                p.grad_rrect((x0 + 14, y0 + 54, x0 + 14 + (x1 - x0 - 28) * min(frac, 1), y0 + 58), 2, fc1, fc2)
-        elif sub:
-            p.text((x0 + 14, y0 + 57), sub, 9.5, T["dim"], anchor="lm")
-
+    vx = prop(166, "◷", "Break in")
     break_in = data.get("break_in")
-    target = data["session"] + max(0, break_in or 0)
-    sfrac = data["session"] / target if target else 0
-    if data["state"] == "paused" or break_in is None:
-        value, vcol = "Paused", T["muted"]
+    if state == "paused" or break_in is None:
+        p.tag(vx, 166, "Paused", "gray")
     elif break_in <= 0:
-        value, vcol = "Now", T["warn"]
+        p.tag(vx, 166, "Now", "orange")
     else:
-        value, vcol = fmt_clock(break_in), (T["warn"] if break_in <= 60 else T["text"])
-    late = break_in is not None and break_in <= 60
-    chip(28, 174, "BREAK IN", value, vcol, sfrac,
-         *((T["warn"], T["danger"]) if late else (T["a1"], T["a2"])),
-         aside=f"{fmt_dur(data['session'])} so far")
+        p.text((vx, 166), fmt_clock(break_in), 13.5, T["warn"] if break_in <= 60 else T["text"], "semibold", "lm")
+
+    vx = prop(198, "↺", "Since break")
+    p.text((vx, 198), fmt_dur(data["session"]), 13.5, T["text"], anchor="lm")
+
+    vx = prop(230, "☕", "Breaks today")
+    n = data.get("breaks", 0)
+    end = p.tag(vx, 230, f"{n} break{'s' if n != 1 else ''}", "blue" if n else "gray")
+    if data.get("break_sec", 0) >= 60:
+        p.text((end + 8, 230), f"{fmt_dur(data['break_sec'])} total", 12.5, T["muted"], anchor="lm")
+
+    vx = prop(262, "◔", "Left today")
     if not limit:
-        chip(186, 332, "LEFT TODAY", "∞", T["text"], None, None, None, "no limit set")
+        p.tag(vx, 262, "No limit", "gray")
     elif total <= limit:
-        chip(186, 332, "LEFT TODAY", fmt_dur(limit - total), T["text"], None, None, None, "until your limit")
+        p.text((vx, 262), fmt_dur(limit - total), 13.5, T["text"], anchor="lm")
     else:
-        chip(186, 332, "OVER LIMIT", "+" + fmt_dur(total - limit), T["danger"], None, None, None, "time to wind down")
+        p.tag(vx, 262, f"Over by {fmt_dur(total - limit)}", "red")
 
-    # --- right column
-    x0, x1 = 356, 732
+    label = "Take a break now"
+    bw = Painter.button_width(p, label, 13, icon=True)
+    box = (L, 284, L + bw, 316)
+    p.button(box, label, False, hover == "break_now", icon="☕")
+    hits.append(("break_now", box))
+
+    p.hline(L, LR, 334)
+    p.text((L, 358), "Today", 16, T["text"], "semibold", "lm")
+    big = fmt_dur(total)
+    p.text((L, 394), big, 32, T["text"], "bold", "lm")
+    bigw = p.textlen(big, 32, "bold")
+    p.text((L + bigw + 10, 399), f"of {fmt_dur(limit)}" if limit else "today", 14, T["muted"], anchor="lm")
+    p.bar(L, LR - 48, 426, ratio if limit else 0, usage_color(ratio), h=6)
+    p.text((LR, 426), f"{round(ratio * 100)}%" if limit else "—", 12, T["muted"], anchor="rm")
+
+    p.rrect((L, 446, LR, 482), 6, fill=T["card_hi"])
+    p.emoji((L + 18, 464), "💡", 15)
+    tip = f"Being away {data.get('break_len_min', 5):g} min counts as a break."
+    p.text((L + 36, 464), p.fit(tip, 12.5, "regular", LR - L - 46), 12.5, T["text"], anchor="lm")
+
     # top apps
-    p.rrect((x0, 24, x1, 232), 16, fill=T["card"], outline=T["border"])
-    p.text((x0 + 18, 47), "Top apps", 13, T["text"], "semibold", "lm")
-    p.text((x1 - 18, 47), "today", 10.5, T["dim"], anchor="rm")
+    p.text((R0, 134), "Top apps", 16, T["text"], "semibold", "lm")
+    p.text((R1, 134), "Today", 12, T["dim"], anchor="rm")
+    p.hline(R0, R1, 152)
     apps = data["apps"][:5]
-    if not apps:
-        p.text(((x0 + x1) / 2, 140), "No activity yet", 12, T["dim"], anchor="mm")
     top = apps[0][1] if apps else 1
-    for i, (name, secs) in enumerate(apps):
-        ry = 78 + i * 31
-        col = APP_COLORS[i % len(APP_COLORS)]
-        p.circle((x0 + 22, ry), 3.5, fill=col)
-        t = fmt_dur(secs)
-        tw = p.textlen(t, 11)
-        p.text((x0 + 32, ry), p.fit(name, 12, "regular", x1 - x0 - 70 - tw), 12, T["text"], anchor="lm")
-        p.text((x1 - 18, ry), t, 11, T["muted"], anchor="rm")
-        bx0, bx1 = x0 + 18, x1 - 18
-        p.rrect((bx0, ry + 10, bx1, ry + 14), 2, fill=T["track"])
-        p.grad_rrect((bx0, ry + 10, bx0 + max(6, (bx1 - bx0) * secs / top), ry + 14), 2,
-                     lerp(col, T["bg"], 0.45), col)
+    for i in range(5):
+        y0 = 152 + i * 34
+        cy = y0 + 17
+        if i < len(apps):
+            name, secs = apps[i]
+            tfg = TAGS[APP_TAGS[i % len(APP_TAGS)]][1]
+            p.rrect((R0, cy - 5, R0 + 10, cy + 5), 2.5, fill=tfg)
+            p.text((R0 + 20, cy), p.fit(name, 13, "regular", 120), 13, T["text"], anchor="lm")
+            p.bar(R0 + 150, R1 - 70, cy, secs / top, tfg, h=6)
+            p.text((R1, cy), fmt_dur(secs), 12.5, T["muted"], anchor="rm")
+        elif i == 0:
+            p.text((R0 + 2, cy), "No activity yet", 13, T["dim"], anchor="lm")
+        p.hline(R0, R1, y0 + 34)
 
-    # week
-    p.rrect((x0, 244, x1, 416), 16, fill=T["card"], outline=T["border"])
-    p.text((x0 + 18, 267), "Last 7 days", 13, T["text"], "semibold", "lm")
-    vals = [v for _, v, _ in data["week"]]
+    # last 7 days chart
+    week = data["week"]
+    p.text((R0, 358), "Last 7 days", 16, T["text"], "semibold", "lm")
+    vals = [d["total"] for d in week]
     active_days = [v for v in vals if v > 0]
     avg = sum(active_days) / len(active_days) if active_days else 0
-    p.text((x1 - 18, 267), f"avg {fmt_dur(avg)}", 10.5, T["dim"], anchor="rm")
-    top_y, base = 296, 380
-    peak = max(max(vals) if vals else 0, limit, 3600) * 1.08
-    inner0, inner1 = x0 + 18, x1 - 18
-    colw = (inner1 - inner0) / 7
-    for i in range(7):
-        cx = inner0 + colw * (i + 0.5)
-        p.rrect((cx - 10, top_y, cx + 10, base), 7, fill=T["track"])
+    p.text((R1, 358), f"Avg {fmt_dur(avg)}", 12, T["dim"], anchor="rm")
+    top_y, base = 384, 470
+    peak = max(max(vals) if vals else 0, limit, 3600) * 1.12
+    colw = (R1 - R0) / 7
+    p.hline(R0, R1, base)
     if limit:
         ly = base - (base - top_y) * limit / peak
-        p.dashed(inner0, inner1, ly, lerp(T["danger"], T["card"], 0.35), 4, 4, 1)
-    for i, (lbl, v, is_today) in enumerate(data["week"]):
-        cx = inner0 + colw * (i + 0.5)
+        p.dashed(R0, R1, ly, lerp(T["danger"], T["bg"], 0.45))
+    for i, d in enumerate(week):
+        cx = R0 + colw * (i + 0.5)
+        v = d["total"]
         if v > 0:
-            h = max(8, (base - top_y) * v / peak)
+            h = max(3, (base - top_y) * v / peak)
             if limit and v > limit:
-                g1, g2 = T["danger"], T["warn"]
-            elif is_today:
-                g1, g2 = T["a2"], T["a1"]
+                col = T["danger"] if d["today"] else (235, 160, 156)
             else:
-                g1, g2 = (88, 96, 130), (58, 64, 88)
-            p.grad_rrect((cx - 10, base - h, cx + 10, base), 7, g1, g2, vertical=True)
-            if is_today:
-                p.text((cx, base - h - 9), fmt_dur(v), 9.5, T["text"], "semibold", "mm")
-        p.text((cx, 399), lbl, 10, T["text"] if is_today else T["dim"],
-               "semibold" if is_today else "regular", "mm")
+                col = T["a1"] if d["today"] else (215, 214, 211)
+            p.rrect((cx - 12, base - h, cx + 12, base - 1), 3, fill=col)
+        p.text((cx, base + 15), d["label"], 12, T["text"] if d["today"] else T["muted"],
+               "semibold" if d["today"] else "regular", "mm")
 
-    return p.result(out_scale)
+
+def _analytics(p, data):
+    T = THEME
+    week = data["week"]
+    vals = [d["total"] for d in week]
+    active_days = [v for v in vals if v > 0]
+    avg = sum(active_days) / len(active_days) if active_days else 0
+    n = data.get("breaks", 0)
+
+    # stat cards
+    cards = [
+        ("Screen time", fmt_dur(data["total"]),
+         f"Active since {data['first']}" if data.get("first") else "No activity yet"),
+        ("Breaks", str(n), f"{fmt_dur(data.get('break_sec', 0))} in total" if n else "None yet today"),
+        ("Longest stretch", fmt_dur(data.get("longest", 0)), "Without a break"),
+        ("Daily average", fmt_dur(avg), "Last 7 days"),
+    ]
+    gap = 12
+    cw = (R1 - L - gap * 3) / 4
+    for i, (label, value, sub) in enumerate(cards):
+        x0 = L + i * (cw + gap)
+        p.rrect((x0, 122, x0 + cw, 194), 6, fill=T["bg"], outline=T["border_hi"])
+        p.text((x0 + 14, 138), label, 12, T["muted"], anchor="lm")
+        p.text((x0 + 14, 162), value, 21, T["text"], "bold", "lm")
+        p.text((x0 + 14, 182), p.fit(sub, 11.5, "regular", cw - 24), 11.5, T["dim"], anchor="lm")
+
+    # activity by hour
+    p.text((L, 224), "Activity by hour", 16, T["text"], "semibold", "lm")
+    p.text((LR, 224), "Today", 12, T["dim"], anchor="rm")
+    hours = data.get("hours") or [0] * 24
+    top_y, base = 248, 398
+    peak = max(max(hours), 600)
+    colw = (LR - L) / 24
+    cur = data.get("hour_now", -1)
+    p.hline(L, LR, base)
+    for h, v in enumerate(hours):
+        cx = L + colw * (h + 0.5)
+        if v > 0:
+            bh = max(2, (base - top_y) * v / peak)
+            col = T["a1"] if h == cur else (182, 206, 232)
+            p.rrect((cx - colw * 0.32, base - bh, cx + colw * 0.32, base - 1), 2, fill=col)
+        if h % 6 == 0:
+            p.text((cx, base + 14), ("12a", "6a", "12p", "6p")[h // 6], 11, T["muted"], anchor="mm")
+    busiest = max(range(24), key=lambda i: hours[i])
+    p.rrect((L, 434, LR, 482), 6, fill=T["card_hi"])
+    p.emoji((L + 18, 458), "📊", 15)
+    if hours[busiest] > 0:
+        b12 = f"{(busiest % 12) or 12}{'am' if busiest < 12 else 'pm'}"
+        if n:
+            per = data["total"] / (n + 1)
+            line1 = f"Busiest hour: {b12} ({fmt_dur(hours[busiest])})."
+            line2 = f"About one break every {fmt_dur(per)}."
+        else:
+            line1 = f"Busiest hour: {b12} ({fmt_dur(hours[busiest])})."
+            line2 = "No breaks yet today — time for one?"
+    else:
+        line1, line2 = "Your hourly activity shows up here", "as you use your PC today."
+    p.text((L + 36, 449), line1, 12.5, T["text"], anchor="lm")
+    p.text((L + 36, 467), line2, 12.5, T["muted"], anchor="lm")
+
+    # week table
+    p.text((R0, 224), "Last 7 days", 16, T["text"], "semibold", "lm")
+    cols = [("Day", R0, "lm"), ("Screen time", R0 + 52, "lm"), ("Breaks", R0 + 222, "mm"), ("Break time", R1, "rm")]
+    for label, x, anchor in cols:
+        p.text((x, 252), label, 12, T["muted"], anchor=anchor)
+    p.hline(R0, R1, 264)
+    peak = max(max(vals) if vals else 0, 1)
+    limit = data["limit"]
+    for i, d in enumerate(week):
+        y0 = 264 + i * 31
+        cy = y0 + 15.5
+        bold = "semibold" if d["today"] else "regular"
+        p.text((R0, cy), d["label"], 12.5, T["text"], bold, anchor="lm")
+        if d["total"] > 0:
+            p.text((R0 + 52, cy), fmt_dur(d["total"]), 12.5, T["text"], bold, anchor="lm")
+            over = limit and d["total"] > limit
+            p.bar(R0 + 112, R0 + 180, cy, d["total"] / peak, T["danger"] if over else T["a1"], h=5)
+            p.text((R0 + 222, cy), str(d["breaks"]), 12.5, T["text"], anchor="mm")
+            p.text((R1, cy), fmt_dur(d["break_sec"]) if d["break_sec"] else "—", 12.5, T["muted"], anchor="rm")
+        else:
+            p.text((R0 + 52, cy), "—", 12.5, T["dim"], anchor="lm")
+        p.hline(R0, R1, y0 + 31)
 
 
 # --------------------------------------------------------------------------- #
-# Popup
+# Popup (a Notion-style toast)
 # --------------------------------------------------------------------------- #
-POPUP_W = 384
+POPUP_W = 380
+_POPUP_ICONS = {"break": "☕", "warn": "⚠️", "limit": "⏰"}
 
 
 def render_popup(kind, title, message, buttons, hover, out_scale):
     """buttons: list of (id, label, primary). Returns (image, hits) with hits in output pixels."""
     T = THEME
     p = Painter(POPUP_W, 400, out_scale * 2, POPUP_KEY)
-    lines = p.wrap(message, 12, POPUP_W - 76 - 22)
-    msg_top = 62
-    btn_y0 = msg_top + len(lines) * 19 + 14
-    btn_y1 = btn_y0 + 34
-    H = btn_y1 + 18
+    lines = p.wrap(message, 12.5, POPUP_W - 56 - 22)
+    msg_top = 56
+    btn_y0 = msg_top + len(lines) * 19 + 12
+    btn_y1 = btn_y0 + 30
+    H = btn_y1 + 16
 
-    p.rrect((0, 0, POPUP_W - 1, H - 1), 18, fill=T["card"], outline=T["border"])
-    # soft accent light in the corner (clipped to card by pasting on a mask)
-    accent = {"break": (T["a1"], T["a2"]), "warn": (T["a2"], T["warn"]),
-              "limit": (T["warn"], T["danger"])}[kind]
-    glow = Painter(POPUP_W, H, p.S, T["card"])
-    glow.glow_blob((40, 40), 70, accent[1], 70)
-    mask = Image.new("L", glow.img.size, 0)
-    ImageDraw.Draw(mask).rounded_rectangle((p.S, p.S, glow.img.width - p.S * 2, glow.img.height - p.S * 2),
-                                           radius=17 * p.S, fill=255)
-    p.img.paste(glow.img, (0, 0), mask)
-
-    # icon
-    p.grad_rrect((22, 22, 58, 58), 18, accent[0], accent[1])
-    white = (255, 255, 255)
-    if kind == "break":
-        p.rrect((33, 32, 37.5, 48), 2, fill=white)
-        p.rrect((42.5, 32, 47, 48), 2, fill=white)
-    elif kind == "limit":
-        p.circle((40, 40), 10, outline=white, width=2.2)
-        p.line([(40, 40), (40, 33.5)], white, 2.2)
-        p.line([(40, 40), (44.5, 42.5)], white, 2.2)
-    else:
-        p.rrect((38.3, 30, 41.7, 43), 1.7, fill=white)
-        p.circle((40, 48), 2, fill=white)
-
-    p.text((76, 38), title, 15.5, T["text"], "semibold", "lm")
+    p.rrect((0, 0, POPUP_W - 1, H - 1), 8, fill=T["bg"], outline=T["border_hi"])
+    p.emoji((30, 33), _POPUP_ICONS[kind], 20)
+    p.text((56, 33), title, 14.5, T["text"], "semibold", "lm")
     for i, ln in enumerate(lines):
-        p.text((76, msg_top + i * 19 + 2), ln, 12, T["muted"], anchor="lm")
+        p.text((56, msg_top + i * 19 + 8), ln, 12.5, T["muted"], anchor="lm")
 
     hits = []
-    # close button
-    close_c = (POPUP_W - 24, 24)
+    close_c = (POPUP_W - 22, 22)
     if hover == "close":
-        p.circle(close_c, 12, fill=T["card_hi"])
-    p.line([(close_c[0] - 4.5, close_c[1] - 4.5), (close_c[0] + 4.5, close_c[1] + 4.5)], T["muted"], 1.6)
-    p.line([(close_c[0] - 4.5, close_c[1] + 4.5), (close_c[0] + 4.5, close_c[1] - 4.5)], T["muted"], 1.6)
-    hits.append(("close", (close_c[0] - 14, close_c[1] - 14, close_c[0] + 14, close_c[1] + 14)))
+        p.rrect((close_c[0] - 11, close_c[1] - 11, close_c[0] + 11, close_c[1] + 11), 4, fill=T["card_hi"])
+    for dx, dy in ((1, 1), (1, -1)):
+        p.line([(close_c[0] - 4.5 * dx, close_c[1] - 4.5 * dy), (close_c[0] + 4.5 * dx, close_c[1] + 4.5 * dy)],
+               T["muted"], 1.4)
+    hits.append(("close", (close_c[0] - 13, close_c[1] - 13, close_c[0] + 13, close_c[1] + 13)))
 
-    x = POPUP_W - 22
+    x = POPUP_W - 18
     for bid, label, primary in reversed(buttons):
-        w = p.textlen(label, 12, "semibold") + 36
+        w = Painter.button_width(p, label, 12.5)
         box = (x - w, btn_y0, x, btn_y1)
-        hov = hover == bid
-        if primary:
-            g1, g2 = accent
-            if hov:
-                g1, g2 = lerp(g1, (255, 255, 255), 0.18), lerp(g2, (255, 255, 255), 0.18)
-            p.grad_rrect(box, 17, g1, g2)
-            p.text(((box[0] + box[2]) / 2, (btn_y0 + btn_y1) / 2), label, 12, T["bg"], "semibold", "mm")
-        else:
-            p.rrect(box, 17, fill=T["border"] if hov else T["card_hi"])
-            p.text(((box[0] + box[2]) / 2, (btn_y0 + btn_y1) / 2), label, 12, T["text"], "semibold", "mm")
+        p.button(box, label, primary, hover == bid, size=12.5)
         hits.append((bid, box))
         x -= w + 8
 
     img = p.img.crop((0, 0, round(POPUP_W * p.S), round(H * p.S)))
     out = img.resize((round(POPUP_W * out_scale), round(H * out_scale)), Image.LANCZOS)
-    # flatten onto the key color so the rounded corners become transparent
     flat = Image.new("RGB", out.size, POPUP_KEY)
     flat.paste(out, (0, 0), out)
     hits = [(bid, tuple(v * out_scale for v in box)) for bid, box in hits]
@@ -438,7 +503,7 @@ def render_popup(kind, title, message, buttons, hover, out_scale):
 # --------------------------------------------------------------------------- #
 # Full-screen break timer
 # --------------------------------------------------------------------------- #
-BREAK_W, BREAK_H = 560, 600
+BREAK_W, BREAK_H = 560, 560
 BREAK_TIPS = [
     "Stand up and stretch your back and shoulders.",
     "Look at something 6 metres away to rest your eyes.",
@@ -450,49 +515,50 @@ BREAK_TIPS = [
 ]
 
 
-def render_break(remaining, total, tip, done, hover, out_scale):
+def render_break(remaining, total, tip, done, hover, out_scale, breaks_today=None):
     """Centre panel of the break overlay, drawn on the page background.
     Returns (image, hits) with hits in output pixels relative to the image."""
     T = THEME
     p = Painter(BREAK_W, BREAK_H, out_scale * 2, T["bg"])
-    cx, cy = BREAK_W / 2, 250
-    c1, c2 = (T["good"], T["a1"]) if done else (T["a1"], T["a2"])
-    p.glow_blob((cx, cy), 210, c2, 60)
-    p.glow_blob((cx - 60, cy - 50), 140, c1, 40)
+    cx = BREAK_W / 2
 
-    p.text((cx, 40), "BREAK COMPLETE" if done else "BREAK TIME", 13, c1, "semibold", "mm")
-    frac = 1.0 if done else (remaining / total if total else 0)
-    p.ring((cx, cy), 165, 18, frac, *((c1, c1) if done else (c1, c2)), T["track"])
+    p.emoji((cx, 62), "🌿" if done else "☕", 54)
+    p.text((cx, 138), "Break complete" if done else "Break time", 30, T["text"], "bold", "mm")
     if done:
-        p.text((cx, cy - 12), "Nice.", 54, T["text"], "semibold", "mm")
-        p.text((cx, cy + 42), "Welcome back", 15, T["muted"], anchor="mm")
+        sub = "Welcome back"
+        if breaks_today:
+            nth = {1: "1st", 2: "2nd", 3: "3rd"}.get(breaks_today, f"{breaks_today}th")
+            sub = f"Welcome back · your {nth} break today"
     else:
-        secs = int(math.ceil(remaining))
-        p.text((cx, cy - 6), f"{secs // 60}:{secs % 60:02d}", 72, T["text"], "light", "mm")
-        p.text((cx, cy + 56), "until you're back", 13, T["muted"], anchor="mm")
+        sub = "Step away from the screen for a bit"
+    p.text((cx, 172), sub, 14, T["muted"], anchor="mm")
 
-    lines = p.wrap(tip, 15, BREAK_W - 60)
-    for i, ln in enumerate(lines[:2]):
-        p.text((cx, 456 + i * 24), ln, 15, T["text"] if not done else T["muted"], anchor="mm")
-
-    hits = []
     if done:
-        label, bid, primary = "Back to work", "finish", True
+        p.text((cx, 254), "Nice.", 72, T["text"], "bold", "mm")
+        p.bar(130, BREAK_W - 130, 322, 1, T["good"], h=6)
+        p.text((cx, 344), f"{round(total / 60)} min break done", 12.5, T["muted"], anchor="mm")
     else:
-        label, bid, primary = "End break early", "skip", False
-    w = p.textlen(label, 12.5, "semibold") + 44
-    box = (cx - w / 2, 524, cx + w / 2, 562)
-    hov = hover == bid
-    if primary:
-        g1, g2 = c1, c2
-        if hov:
-            g1, g2 = lerp(g1, (255, 255, 255), 0.18), lerp(g2, (255, 255, 255), 0.18)
-        p.grad_rrect(box, 19, g1, g2)
-        p.text((cx, (box[1] + box[3]) / 2), label, 12.5, T["bg"], "semibold", "mm")
+        p.text((cx, 254), fmt_clock(remaining), 80, T["text"], "light", "mm")
+        p.bar(130, BREAK_W - 130, 322, 1 - (remaining / total if total else 0), T["a1"], h=6)
+        p.text((cx, 344), f"{fmt_clock(total - remaining)} of {fmt_clock(total)}", 12.5, T["muted"], anchor="mm")
+
+    # tip callout
+    lines = p.wrap(tip, 13.5, BREAK_W - 150)[:2]
+    ch = 24 + 20 * len(lines)
+    top = 380
+    p.rrect((60, top, BREAK_W - 60, top + ch), 6, fill=T["card_hi"])
+    p.emoji((86, top + 22), "💡", 16)
+    for i, ln in enumerate(lines):
+        p.text((108, top + 22 + i * 20), ln, 13.5, T["text"], anchor="lm")
+
+    if done:
+        bid, label, primary = "finish", "Back to work", True
     else:
-        p.rrect(box, 19, fill=T["card_hi"] if hov else T["bg"], outline=T["border"])
-        p.text((cx, (box[1] + box[3]) / 2), label, 12.5, T["text"] if hov else T["muted"], "semibold", "mm")
-    hits.append((bid, tuple(v * out_scale for v in box)))
+        bid, label, primary = "skip", "End break early", False
+    w = Painter.button_width(p, label, 13.5)
+    box = (cx - w / 2, 486, cx + w / 2, 522)
+    p.button(box, label, primary, hover == bid, size=13.5)
+    hits = [(bid, tuple(v * out_scale for v in box))]
     return p.result(out_scale), hits
 
 
@@ -500,13 +566,21 @@ def render_break(remaining, total, tip, done, hover, out_scale):
 # Tray icon
 # --------------------------------------------------------------------------- #
 def render_tray(ratio, paused=False):
-    p = Painter(64, 64, 4, (0, 0, 0, 0))
+    """Flat progress ring that reads on both light and dark taskbars."""
+    S = 4
+    img = Image.new("RGBA", (64 * S, 64 * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    box = (4 * S, 4 * S, 60 * S, 60 * S)
+    w = 9 * S
     if paused:
-        p.ring((32, 32), 28, 9, 0, THEME["dim"], THEME["dim"], (120, 126, 140), glow=False)
-        p.rrect((24, 21, 29, 43), 2, fill=(160, 166, 180))
-        p.rrect((35, 21, 40, 43), 2, fill=(160, 166, 180))
+        d.ellipse(box, fill=(255, 255, 255, 255), outline=(150, 150, 147, 255), width=w)
+        d.rounded_rectangle((24 * S, 21 * S, 29 * S, 43 * S), radius=2 * S, fill=(120, 119, 116, 255))
+        d.rounded_rectangle((35 * S, 21 * S, 40 * S, 43 * S), radius=2 * S, fill=(120, 119, 116, 255))
     else:
-        c1, c2 = status_colors(ratio)
-        p.ring((32, 32), 28, 9, max(ratio, 0.03), c1, c2, (80, 86, 104), glow=False)
-        p.circle((32, 32), 9, fill=c2)
-    return p.img.resize((64, 64), Image.LANCZOS)
+        color = usage_color(ratio) + (255,)
+        d.ellipse(box, fill=(255, 255, 255, 255))
+        d.arc(box, 0, 360, fill=(222, 222, 219, 255), width=w)
+        frac = max(0.04, min(1.0, ratio))
+        d.arc(box, -90, -90 + 360 * frac, fill=color, width=w)
+        d.ellipse((24 * S, 24 * S, 40 * S, 40 * S), fill=color)
+    return img.resize((64, 64), Image.LANCZOS)
