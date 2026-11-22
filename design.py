@@ -68,6 +68,14 @@ def fmt_dur(seconds):
     return f"{h}h {m:02d}m" if h else f"{m}m"
 
 
+def fmt_clock(seconds):
+    """Countdown style: 12:34, or 1:05:00 past an hour."""
+    s = int(math.ceil(max(0, seconds)))
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 def status_colors(ratio):
     """Gradient pair for a usage ratio (0..1+)."""
     if ratio < 0.8:
@@ -254,11 +262,13 @@ def render_dashboard(data, out_scale):
     p.text((180, 262), f"of {fmt_dur(limit)}" if limit else "no daily limit", 12, T["muted"], anchor="mm")
 
     # --- chips
-    def chip(x0, x1, title, value, value_color, frac, fc1, fc2, sub=None):
+    def chip(x0, x1, title, value, value_color, frac, fc1, fc2, sub=None, aside=None):
         y0, y1 = 346, 412
         p.rrect((x0, y0, x1, y1), 14, fill=T["card"], outline=T["border"])
         p.text((x0 + 14, y0 + 17), title, 9.5, T["dim"], "semibold", "lm")
         p.text((x0 + 14, y0 + 39), value, 18, value_color, "semibold", "lm")
+        if aside:
+            p.text((x1 - 14, y0 + 17), aside, 9.5, T["dim"], anchor="rm")
         if frac is not None:
             p.rrect((x0 + 14, y0 + 54, x1 - 14, y0 + 58), 2, fill=T["track"])
             if frac > 0:
@@ -266,11 +276,19 @@ def render_dashboard(data, out_scale):
         elif sub:
             p.text((x0 + 14, y0 + 57), sub, 9.5, T["dim"], anchor="lm")
 
-    interval = data["interval"]
-    sfrac = data["session"] / interval if interval else 0
-    chip(28, 174, "SINCE BREAK", fmt_dur(data["session"]),
-         T["warn"] if sfrac >= 1 else T["text"], sfrac,
-         *((T["warn"], T["danger"]) if sfrac >= 1 else (T["a1"], T["a2"])))
+    break_in = data.get("break_in")
+    target = data["session"] + max(0, break_in or 0)
+    sfrac = data["session"] / target if target else 0
+    if data["state"] == "paused" or break_in is None:
+        value, vcol = "Paused", T["muted"]
+    elif break_in <= 0:
+        value, vcol = "Now", T["warn"]
+    else:
+        value, vcol = fmt_clock(break_in), (T["warn"] if break_in <= 60 else T["text"])
+    late = break_in is not None and break_in <= 60
+    chip(28, 174, "BREAK IN", value, vcol, sfrac,
+         *((T["warn"], T["danger"]) if late else (T["a1"], T["a2"])),
+         aside=f"{fmt_dur(data['session'])} so far")
     if not limit:
         chip(186, 332, "LEFT TODAY", "∞", T["text"], None, None, None, "no limit set")
     elif total <= limit:

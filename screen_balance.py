@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
     "over_limit_repeat_min": 30,
 }
 
-TICK_MS = 5000
+TICK_MS = 1000  # 1 s so the "Break in" countdown ticks smoothly
 SAVE_EVERY_SEC = 60
 KEEP_DAYS = 60
 
@@ -313,6 +313,7 @@ class ScreenBalance:
         post = lambda cmd: (lambda icon, item: self.cmd_q.put(cmd))
         return pystray.Menu(
             pystray.MenuItem(lambda item: f"Today: {fmt_dur(self._day()['total'])}", post("stats"), default=True),
+            pystray.MenuItem(lambda item: self._break_in_text(), None, enabled=False),
             pystray.MenuItem(lambda item: f"Since last break: {fmt_dur(self.session_sec)}", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open dashboard", post("stats")),
@@ -331,6 +332,20 @@ class ScreenBalance:
     def _reminders_paused(self):
         return time.time() < self.reminders_paused_until
 
+    def _break_in(self):
+        """Seconds of active use left before the next break reminder (None while paused)."""
+        if self._reminders_paused():
+            return None
+        return self.next_break_at - self.session_sec
+
+    def _break_in_text(self):
+        if self._break_win is not None:
+            return "On a break"
+        left = self._break_in()
+        if left is None:
+            return "Break in: paused"
+        return f"Break in: {design.fmt_clock(left)}" if left > 0 else "Break in: now"
+
     def _update_tray(self):
         total = self._day()["total"]
         limit = self._limit_sec()
@@ -342,8 +357,8 @@ class ScreenBalance:
             self.icon.icon = design.render_tray(ratio, paused)
         status = "idle" if self.is_idle else "active"
         limit_txt = f" / {fmt_dur(limit)}" if limit else ""
-        self.icon.title = (f"Screen Balance\nToday: {fmt_dur(total)}{limit_txt}\n"
-                           f"Since break: {fmt_dur(self.session_sec)} ({status})")[:127]
+        self.icon.title = (f"Screen Balance\n{self._break_in_text()}\n"
+                           f"Today: {fmt_dur(total)}{limit_txt} ({status})")[:127]
         self.icon.update_menu()
 
     # ---------------- main loop ----------------
@@ -411,7 +426,9 @@ class ScreenBalance:
             self._last_save = now
 
         self._update_tray()
-        if self._stats_win is not None:
+        # redraw the dashboard only while it's actually on screen (it's the costly part)
+        if self._stats_win is not None and self._stats_win.winfo_exists() \
+                and self._stats_win.state() == "normal":
             self._refresh_stats()
 
     # ---------------- rules ----------------
@@ -669,6 +686,7 @@ class ScreenBalance:
             "total": day["total"],
             "limit": self._limit_sec(),
             "session": self.session_sec,
+            "break_in": self._break_in(),
             "interval": self.config["break_interval_min"] * 60,
             "apps": sorted(day["apps"].items(), key=lambda kv: kv[1], reverse=True),
             "week": week,
