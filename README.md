@@ -84,9 +84,18 @@ Breaks are counted whether you finish the break timer, step away for 5+ minutes,
 ### A tray icon that tells you how you're doing
 The icon is a small progress ring that fills with your day: blue while you're on track, orange near your limit, red when you're over. You can check your day without opening anything.
 
-<img src="docs/tray-icons.png" alt="Tray icon states: on track, close to the limit, over the limit, paused" width="328">
+<img src="docs/tray-icons.png" alt="Tray icon states: on track, close to the limit, over the limit, do not disturb" width="328">
 
-<sub>On track · close to the limit · over the limit · reminders paused</sub>
+<sub>On track · close to the limit · over the limit · do not disturb</sub>
+
+### Do not disturb
+For moments when you need to be fully focused, such as an exam, a meeting, a presentation or deep work, turn on **Do not disturb**:
+
+- **Nothing pops up:** no break reminders and no limit warnings. A popup already on screen disappears too.
+- Choose **30 minutes, 1 hour, 2 hours, or until you turn it off** from the tray menu, or click **🌙 Do not disturb** on the dashboard for an hour.
+- Your screen time is **still tracked**, and **Take a break now** still works if you decide to.
+- The tray icon turns into a purple moon, and the dashboard shows when DND ends.
+- When DND ends you get **at most one** catch-up reminder if a break is overdue. Nothing piles up.
 
 ### Light and dark mode
 Choose **System**, **Light** or **Dark** under *Appearance* in Settings. **System** (the default) follows your Windows light/dark setting and switches automatically when you change it. The dashboard, popups, break screen, settings and even the window title bars follow along. The images in this README match your GitHub theme too.
@@ -150,7 +159,8 @@ A ring icon appears in the system tray. If you don't see it, click the **^** arr
 | Open the dashboard | Double-click the tray icon |
 | Take a break right now | **☕ Take a break now** on the dashboard, or the tray menu |
 | See time until your next break | Hover over the tray icon, open the tray menu, or look at the dashboard |
-| Take a break now, settings, pause reminders for 1 hour, start with Windows, quit | Right-click the tray icon |
+| Do not disturb (30 min, 1 h, 2 h, or until turned off) | Tray menu → **Do not disturb**, or **🌙 Do not disturb** on the dashboard (1 hour) |
+| Take a break now, settings, start with Windows, quit | Right-click the tray icon |
 
 ## Known limitations
 

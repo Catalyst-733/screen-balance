@@ -318,8 +318,8 @@ def _overview(p, data, hover, hits):
 
     vx = prop(134, "◉", "Status")
     state = data["state"]
-    if state == "paused":
-        p.tag(vx, 134, "Reminders paused", "yellow")
+    if state == "dnd":
+        p.tag(vx, 134, f"Do not disturb · {data.get('dnd_label', '')}".rstrip(" ·"), "purple")
     elif state == "idle":
         p.tag(vx, 134, "Idle", "gray")
     else:
@@ -327,8 +327,8 @@ def _overview(p, data, hover, hits):
 
     vx = prop(166, "◷", "Break in")
     break_in = data.get("break_in")
-    if state == "paused" or break_in is None:
-        p.tag(vx, 166, "Paused", "gray")
+    if state == "dnd" or break_in is None:
+        p.tag(vx, 166, "Silenced", "gray")
     elif break_in <= 0:
         p.tag(vx, 166, "Now", "orange")
     else:
@@ -356,6 +356,22 @@ def _overview(p, data, hover, hits):
     box = (L, 284, L + bw, 316)
     p.button(box, label, False, hover == "break_now", icon="☕")
     hits.append(("break_now", box))
+
+    # do not disturb toggle
+    dnd_on = state == "dnd"
+    label = "Turn off DND" if dnd_on else "Do not disturb"
+    x0 = box[2] + 8
+    box = (x0, 284, x0 + Painter.button_width(p, label, 13, icon=True), 316)
+    if dnd_on:
+        bg, fg = TAGS["purple"]
+        p.rrect(box, 6, fill=lerp(bg, fg, 0.12) if hover == "dnd" else bg)
+        tw = p.textlen(label, 13, "semibold")
+        start = (box[0] + box[2]) / 2 - (tw + 21) / 2
+        p.emoji((start + 6.5, 300), "🌙", 13)
+        p.text((start + 21, 300), label, 13, fg, "semibold", "lm")
+    else:
+        p.button(box, label, False, hover == "dnd", icon="🌙")
+    hits.append(("dnd", box))
 
     p.hline(L, LR, 334)
     p.text((L, 358), "Today", 16, T["text"], "semibold", "lm")
@@ -623,9 +639,11 @@ def render_tray(ratio, paused=False):
     box = (4 * S, 4 * S, 60 * S, 60 * S)
     w = 9 * S
     if paused:
-        d.ellipse(box, fill=(255, 255, 255, 255), outline=(150, 150, 147, 255), width=w)
-        d.rounded_rectangle((24 * S, 21 * S, 29 * S, 43 * S), radius=2 * S, fill=(120, 119, 116, 255))
-        d.rounded_rectangle((35 * S, 21 * S, 40 * S, 43 * S), radius=2 * S, fill=(120, 119, 116, 255))
+        # Do not disturb: a crescent moon on purple
+        purple = (144, 101, 176, 255)
+        d.ellipse(box, fill=purple)
+        d.ellipse((15 * S, 15 * S, 49 * S, 49 * S), fill=(255, 255, 255, 255))
+        d.ellipse((24 * S, 9 * S, 54 * S, 39 * S), fill=purple)
     else:
         color = usage_color(ratio) + (255,)
         d.ellipse(box, fill=(255, 255, 255, 255))
