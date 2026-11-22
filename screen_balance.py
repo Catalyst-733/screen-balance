@@ -298,7 +298,7 @@ class ScreenBalance:
         self.session_sec = 0.0            # continuous active time since last break
         self.break_count = 0              # bumps every time a real break is detected
         self.next_break_at = self.config["break_interval_min"] * 60
-        self.reminders_paused_until = 0.0
+        self.dnd_until = 0.0              # Do not disturb: 0 = off, inf = until turned off
         self.limit_notices = {}           # date -> {"80": bool, "100": bool, "last": ts}
         self.current_app = ""
         self.is_idle = False
@@ -386,39 +386,84 @@ class ScreenBalance:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open dashboard", post("stats")),
             pystray.MenuItem("Take a break now", post("break_now")),
-            pystray.MenuItem("Settings", post("settings")),
             pystray.MenuItem(
-                lambda item: "Resume reminders" if self._reminders_paused() else "Pause reminders for 1 hour",
-                post("toggle_pause"),
+                lambda item: f"Do not disturb ({self._dnd_label()})" if self._dnd_active() else "Do not disturb",
+                pystray.Menu(
+                    pystray.MenuItem("For 30 minutes", post("dnd_30")),
+                    pystray.MenuItem("For 1 hour", post("dnd_60")),
+                    pystray.MenuItem("For 2 hours", post("dnd_120")),
+                    pystray.MenuItem("Until I turn it off", post("dnd_forever")),
+                    pystray.Menu.SEPARATOR,
+                    pystray.MenuItem("Turn off", post("dnd_off"), enabled=lambda item: self._dnd_active()),
+                ),
             ),
+            pystray.MenuItem("Settings", post("settings")),
             pystray.MenuItem("Start with Windows", post("toggle_autostart"),
                              checked=lambda item: autostart_enabled()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", post("quit")),
         )
 
-    def _reminders_paused(self):
-        return time.time() < self.reminders_paused_until
+    # ---------------- do not disturb ----------------
+    def _dnd_active(self):
+        return time.time() < self.dnd_until
+
+    def _dnd_label(self):
+        """'until 15:30' or 'until turned off'."""
+        if self.dnd_until == float("inf"):
+            return "until turned off"
+        end = dt.datetime.fromtimestamp(self.dnd_until)
+        return f"until {end.hour}:{end.minute:02d}"
+
+    def _set_dnd(self, minutes):
+        """minutes: number, None = until turned off, 0 = off."""
+        if minutes == 0:
+            self.dnd_until = 0.0
+        else:
+            self.dnd_until = float("inf") if minutes is None else time.time() + minutes * 60
+            # silence anything already on screen (the break reminder will come back after DND)
+            if self._popup is not None:
+                self._popup.destroy()
+                self._popup = None
+        self._tray_key = None
+        self._update_tray()
+        if self._stats_win is not None:
+            self._refresh_stats()
+
+    def _cmd_dnd_30(self):
+        self._set_dnd(30)
+
+    def _cmd_dnd_60(self):
+        self._set_dnd(60)
+
+    def _cmd_dnd_120(self):
+        self._set_dnd(120)
+
+    def _cmd_dnd_forever(self):
+        self._set_dnd(None)
+
+    def _cmd_dnd_off(self):
+        self._set_dnd(0)
 
     def _break_in(self):
-        """Seconds of active use left before the next break reminder (None while paused)."""
-        if self._reminders_paused():
+        """Seconds of active use left before the next break reminder (None during DND)."""
+        if self._dnd_active():
             return None
         return self.next_break_at - self.session_sec
 
     def _break_in_text(self):
         if self._break_win is not None:
             return "On a break"
+        if self._dnd_active():
+            return f"Do not disturb {self._dnd_label()}"
         left = self._break_in()
-        if left is None:
-            return "Break in: paused"
         return f"Break in: {design.fmt_clock(left)}" if left > 0 else "Break in: now"
 
     def _update_tray(self):
         total = self._day()["total"]
         limit = self._limit_sec()
         ratio = total / limit if limit else 0
-        paused = self._reminders_paused()
+        paused = self._dnd_active()
         key = (round(ratio, 2), paused)
         if key != self._tray_key:      # only re-render when it visibly changes
             self._tray_key = key
@@ -523,7 +568,7 @@ class ScreenBalance:
 
     # ---------------- rules ----------------
     def _check_break(self):
-        if self._reminders_paused() or self._popup is not None:
+        if self._dnd_active() or self._popup is not None:
             return
         if self.session_sec >= self.next_break_at:
             self._show_popup(
@@ -533,7 +578,7 @@ class ScreenBalance:
             )
 
     def _check_limit(self):
-        if self._reminders_paused() or self._popup is not None:
+        if self._dnd_active() or self._popup is not None:
             return
         total = self._day()["total"]
         limit = self._limit_sec()
@@ -777,8 +822,8 @@ class ScreenBalance:
                 "longest": rec.get("longest", 0.0),
                 "today": i == 0,
             })
-        if self._reminders_paused():
-            state = "paused"
+        if self._dnd_active():
+            state = "dnd"
         elif self.is_idle:
             state = "idle"
         else:
@@ -792,6 +837,7 @@ class ScreenBalance:
             "week": week,
             "date_str": today.strftime("%A, %B %d").replace(" 0", " "),
             "state": state,
+            "dnd_label": self._dnd_label() if state == "dnd" else "",
             "current_app": self.current_app or "—",
             "break_len_min": self.config["break_length_min"],
             "breaks": day["breaks"],
@@ -843,6 +889,9 @@ class ScreenBalance:
                 self._dash_hover = None
                 self._start_break()
                 self._refresh_stats()
+            elif h == "dnd":
+                # dashboard button: 1 hour of quiet, or switch it off if it's on
+                self._set_dnd(0 if self._dnd_active() else 60)
 
         self._stats_label.bind("<Motion>", on_move)
         self._stats_label.bind("<Leave>", on_leave)
@@ -1020,10 +1069,6 @@ class ScreenBalance:
         win.focus_force()
 
     # ---------------- other commands ----------------
-    def _cmd_toggle_pause(self):
-        self.reminders_paused_until = 0.0 if self._reminders_paused() else time.time() + 3600
-        self._update_tray()
-
     def _cmd_toggle_autostart(self):
         set_autostart(not autostart_enabled())
         self.icon.update_menu()
