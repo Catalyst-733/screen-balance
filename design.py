@@ -631,24 +631,55 @@ def render_break(remaining, total, tip, done, hover, out_scale, breaks_today=Non
 # --------------------------------------------------------------------------- #
 # Tray icon
 # --------------------------------------------------------------------------- #
-def render_tray(ratio, paused=False):
-    """Flat progress ring that reads on both light and dark taskbars."""
-    S = 4
+def render_tray(ratio, paused=False, dark_taskbar=True):
+    """Notion-style app tile: a rounded square with a minimal hourglass.
+
+    The sand shows the day: it drains from the top bulb into the bottom one as you
+    approach your daily limit (blue -> orange -> red). Do not disturb shows a moon.
+    The tile is light or dark to sit naturally on the taskbar."""
+    S = 8  # draw big, then shrink, so it stays crisp at 16-32 px
     img = Image.new("RGBA", (64 * S, 64 * S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    box = (4 * S, 4 * S, 60 * S, 60 * S)
-    w = 9 * S
-    if paused:
-        # Do not disturb: a crescent moon on purple
-        purple = (144, 101, 176, 255)
-        d.ellipse(box, fill=purple)
-        d.ellipse((15 * S, 15 * S, 49 * S, 49 * S), fill=(255, 255, 255, 255))
-        d.ellipse((24 * S, 9 * S, 54 * S, 39 * S), fill=purple)
+
+    def b(*v):
+        return tuple(x * S for x in v)
+
+    if dark_taskbar:
+        tile, edge, ink = (47, 47, 47, 255), (84, 84, 84, 255), (236, 236, 234, 255)
+        palette = DARK_TAGS
     else:
-        color = usage_color(ratio) + (255,)
-        d.ellipse(box, fill=(255, 255, 255, 255))
-        d.arc(box, 0, 360, fill=(222, 222, 219, 255), width=w)
-        frac = max(0.04, min(1.0, ratio))
-        d.arc(box, -90, -90 + 360 * frac, fill=color, width=w)
-        d.ellipse((24 * S, 24 * S, 40 * S, 40 * S), fill=color)
+        tile, edge, ink = (255, 255, 255, 255), (55, 53, 47, 255), (55, 53, 47, 255)
+        palette = LIGHT_TAGS
+    d.rounded_rectangle(b(2, 2, 62, 62), radius=15 * S, fill=tile, outline=edge, width=3 * S)
+
+    if paused:
+        moon = palette["purple"][1] + (255,)
+        d.ellipse(b(15, 15, 49, 49), fill=moon)
+        d.ellipse(b(25, 9, 55, 39), fill=tile)
+        return img.resize((64, 64), Image.LANCZOS)
+
+    r = max(0.0, min(1.0, ratio))
+    sand = (LIGHT if not dark_taskbar else DARK)["a1"] if ratio < 0.8 else (
+        palette["orange"][1] if ratio < 1 else palette["red"][1])
+    sand = tuple(sand) + (255,)
+
+    top, mid, bot = 18, 32, 46       # bulb geometry
+    left, right, cx = 20, 44, 32
+    half = (right - left) / 2
+    # sand left in the top bulb (an inverted triangle that shrinks as the day goes on)
+    if r < 1:
+        yt = top + (mid - top) * r
+        w = half * (mid - yt) / (mid - top)
+        d.polygon([b(cx - w, yt), b(cx + w, yt), b(cx, mid)], fill=sand)
+    # sand piled in the bottom bulb (fills from the base up)
+    if r > 0:
+        yb = bot - (bot - mid) * r
+        w = half * (yb - mid) / (bot - mid)
+        d.polygon([b(cx - w, yb), b(cx + w, yb), b(right, bot), b(left, bot)], fill=sand)
+    # glass outline and caps
+    lw = int(3.2 * S)
+    d.line([b(left, top), b(cx, mid), b(left, bot)], fill=ink, width=lw, joint="curve")
+    d.line([b(right, top), b(cx, mid), b(right, bot)], fill=ink, width=lw, joint="curve")
+    d.rounded_rectangle(b(15, 12, 49, 17), radius=2.5 * S, fill=ink)
+    d.rounded_rectangle(b(15, 47, 49, 52), radius=2.5 * S, fill=ink)
     return img.resize((64, 64), Image.LANCZOS)

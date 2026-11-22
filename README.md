@@ -82,9 +82,12 @@ Switch to the **Analytics** tab for the detail:
 Breaks are counted whether you finish the break timer, step away for 5+ minutes, or put the PC to sleep.
 
 ### A tray icon that tells you how you're doing
-The icon is a small progress ring that fills with your day: blue while you're on track, orange near your limit, red when you're over. You can check your day without opening anything.
+The icon is a small Notion-style tile with an hourglass whose sand shows your day. It drains from the top into the bottom as you approach your daily limit: blue while you're on track, orange near your limit, red when you're over. During Do not disturb it shows a moon. The tile is light or dark to match your taskbar, so you can check your day without opening anything.
 
-<img src="docs/tray-icons.png" alt="Tray icon states: on track, close to the limit, over the limit, do not disturb" width="328">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/tray-icons-dark.png">
+  <img src="docs/tray-icons.png" alt="Tray icon states: on track, close to the limit, over the limit, do not disturb" width="328">
+</picture>
 
 <sub>On track · close to the limit · over the limit · do not disturb</sub>
 
@@ -94,7 +97,8 @@ For moments when you need to be fully focused, such as an exam, a meeting, a pre
 - **Nothing pops up:** no break reminders and no limit warnings. A popup already on screen disappears too.
 - Choose **30 minutes, 1 hour, 2 hours, or until you turn it off** from the tray menu, or click **🌙 Do not disturb** on the dashboard for an hour.
 - Your screen time is **still tracked**, and **Take a break now** still works if you decide to.
-- The tray icon turns into a purple moon, and the dashboard shows when DND ends.
+- The tray icon shows a moon, and the dashboard shows when DND ends.
+- It stays on through a restart or reboot until its end time.
 - When DND ends you get **at most one** catch-up reminder if a break is overdue. Nothing piles up.
 
 ### Light and dark mode
@@ -148,7 +152,7 @@ python -m pip install --user -r requirements.txt
 pythonw screen_balance.py
 ```
 
-A ring icon appears in the system tray. If you don't see it, click the **^** arrow on the taskbar.
+An hourglass icon appears in the system tray. If you don't see it, click the **^** arrow on the taskbar.
 
 **4. (Optional) Start it with Windows:** turn on **Start with Windows** in Settings or in the tray menu.
 
