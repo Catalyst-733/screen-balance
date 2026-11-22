@@ -73,6 +73,9 @@ def main():
         [("ok", "Got it", True)], None, SCALE)
     save_popup("popup-limit.png", img)
 
+    img, _ = design.render_break(187, 300, design.BREAK_TIPS[1], False, None, SCALE)
+    img.save(os.path.join(OUT, "break-timer.png"))
+
     icons = [design.render_tray(r, p) for r, p in ((0.35, False), (0.85, False), (1.1, False), (0.5, True))]
     strip = Image.new("RGBA", (64 * 4 + 24 * 3, 64), (0, 0, 0, 0))
     for i, ic in enumerate(icons):

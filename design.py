@@ -418,6 +418,67 @@ def render_popup(kind, title, message, buttons, hover, out_scale):
 
 
 # --------------------------------------------------------------------------- #
+# Full-screen break timer
+# --------------------------------------------------------------------------- #
+BREAK_W, BREAK_H = 560, 600
+BREAK_TIPS = [
+    "Stand up and stretch your back and shoulders.",
+    "Look at something 6 metres away to rest your eyes.",
+    "Drink a glass of water.",
+    "Roll your neck slowly, both directions.",
+    "Take a few slow, deep breaths.",
+    "Walk around for a minute.",
+    "Shake out your hands and wrists.",
+]
+
+
+def render_break(remaining, total, tip, done, hover, out_scale):
+    """Centre panel of the break overlay, drawn on the page background.
+    Returns (image, hits) with hits in output pixels relative to the image."""
+    T = THEME
+    p = Painter(BREAK_W, BREAK_H, out_scale * 2, T["bg"])
+    cx, cy = BREAK_W / 2, 250
+    c1, c2 = (T["good"], T["a1"]) if done else (T["a1"], T["a2"])
+    p.glow_blob((cx, cy), 210, c2, 60)
+    p.glow_blob((cx - 60, cy - 50), 140, c1, 40)
+
+    p.text((cx, 40), "BREAK COMPLETE" if done else "BREAK TIME", 13, c1, "semibold", "mm")
+    frac = 1.0 if done else (remaining / total if total else 0)
+    p.ring((cx, cy), 165, 18, frac, *((c1, c1) if done else (c1, c2)), T["track"])
+    if done:
+        p.text((cx, cy - 12), "Nice.", 54, T["text"], "semibold", "mm")
+        p.text((cx, cy + 42), "Welcome back", 15, T["muted"], anchor="mm")
+    else:
+        secs = int(math.ceil(remaining))
+        p.text((cx, cy - 6), f"{secs // 60}:{secs % 60:02d}", 72, T["text"], "light", "mm")
+        p.text((cx, cy + 56), "until you're back", 13, T["muted"], anchor="mm")
+
+    lines = p.wrap(tip, 15, BREAK_W - 60)
+    for i, ln in enumerate(lines[:2]):
+        p.text((cx, 456 + i * 24), ln, 15, T["text"] if not done else T["muted"], anchor="mm")
+
+    hits = []
+    if done:
+        label, bid, primary = "Back to work", "finish", True
+    else:
+        label, bid, primary = "End break early", "skip", False
+    w = p.textlen(label, 12.5, "semibold") + 44
+    box = (cx - w / 2, 524, cx + w / 2, 562)
+    hov = hover == bid
+    if primary:
+        g1, g2 = c1, c2
+        if hov:
+            g1, g2 = lerp(g1, (255, 255, 255), 0.18), lerp(g2, (255, 255, 255), 0.18)
+        p.grad_rrect(box, 19, g1, g2)
+        p.text((cx, (box[1] + box[3]) / 2), label, 12.5, T["bg"], "semibold", "mm")
+    else:
+        p.rrect(box, 19, fill=T["card_hi"] if hov else T["bg"], outline=T["border"])
+        p.text((cx, (box[1] + box[3]) / 2), label, 12.5, T["text"] if hov else T["muted"], "semibold", "mm")
+    hits.append((bid, tuple(v * out_scale for v in box)))
+    return p.result(out_scale), hits
+
+
+# --------------------------------------------------------------------------- #
 # Tray icon
 # --------------------------------------------------------------------------- #
 def render_tray(ratio, paused=False):

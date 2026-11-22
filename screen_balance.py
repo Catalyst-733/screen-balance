@@ -19,6 +19,7 @@ import datetime as dt
 import json
 import os
 import queue
+import random
 import sys
 import threading
 import time
@@ -278,6 +279,7 @@ class ScreenBalance:
         self._last_wall = time.time()
         self._last_save = time.monotonic()
         self._popup = None
+        self._break_win = None
         self._stats_win = None
         self._settings_win = None
         self._tray_key = None
@@ -314,6 +316,7 @@ class ScreenBalance:
             pystray.MenuItem(lambda item: f"Since last break: {fmt_dur(self.session_sec)}", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open dashboard", post("stats")),
+            pystray.MenuItem("Take a break now", post("break_now")),
             pystray.MenuItem("Settings", post("settings")),
             pystray.MenuItem(
                 lambda item: "Resume reminders" if self._reminders_paused() else "Pause reminders for 1 hour",
@@ -391,7 +394,9 @@ class ScreenBalance:
             self.break_count += 1
             self.next_break_at = self.config["break_interval_min"] * 60
 
-        if not self.is_idle:
+        if self._break_win is not None:
+            pass  # on a break: nothing counts as screen time
+        elif not self.is_idle:
             app = foreground_app()
             self.current_app = app
             day = self._day()
@@ -496,17 +501,24 @@ class ScreenBalance:
 
         breaks_at_open = self.break_count
 
-        def close():
-            if kind == "break" and self.break_count == breaks_at_open:
-                # no real break happened yet: remind again after the snooze.
-                # (if they already stepped away, the normal full interval applies)
-                self.next_break_at = self.session_sec + snooze * 60
+        def close(action="close"):
             self._popup = None
             win.destroy()
+            if kind == "break" and action == "ok":
+                self._start_break()
+            elif kind == "break" and self.break_count == breaks_at_open:
+                # snoozed / dismissed and no real break happened yet: remind again after the snooze.
+                # (if they already stepped away, the normal full interval applies)
+                self.next_break_at = self.session_sec + snooze * 60
+
+        def on_click(e):
+            action = hit(e.x, e.y)
+            if action:
+                close(action)
 
         canvas.bind("<Motion>", on_move)
         canvas.bind("<Leave>", on_leave)
-        canvas.bind("<Button-1>", lambda e: close() if hit(e.x, e.y) else None)
+        canvas.bind("<Button-1>", on_click)
 
         draw()
         win.update_idletasks()
@@ -529,6 +541,115 @@ class ScreenBalance:
         win.geometry(f"+{x}+{y_end + slide}")
         animate()
         win.bell()
+
+    # ---------------- full-screen break timer ----------------
+    def _start_break(self):
+        """Dim every screen and show a countdown on top of everything until the break is over."""
+        if self._break_win is not None:
+            return
+        if self._popup is not None:
+            self._popup.destroy()
+            self._popup = None
+
+        total = self.config["break_length_min"] * 60
+        end_at = time.monotonic() + total
+        tip_offset = random.randrange(len(design.BREAK_TIPS))
+
+        # cover the whole virtual desktop (all monitors), centre the timer on the main one
+        vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
+        vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        if vw <= 0 or vh <= 0:
+            vx, vy, vw, vh = 0, 0, sw, sh
+
+        bg = hexc(THEME["bg"])
+        win = tk.Toplevel(self.root)
+        self._break_win = win
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.attributes("-alpha", 0.0)
+        win.configure(bg=bg, cursor="arrow")
+        win.geometry(f"{vw}x{vh}+{vx}+{vy}")
+        canvas = tk.Canvas(win, width=vw, height=vh, bg=bg, highlightthickness=0, bd=0)
+        canvas.pack()
+        px, py = -vx + sw // 2, -vy + sh // 2   # main monitor centre, in canvas coords
+        item = canvas.create_image(px, py, anchor="center")
+        state = {"hover": None, "hits": [], "photo": None, "done": False, "origin": (0, 0)}
+
+        def draw():
+            remaining = max(0.0, end_at - time.monotonic())
+            if state["done"]:
+                tip = "Your eyes, back and mind will thank you."
+            else:
+                elapsed = total - remaining
+                tip = design.BREAK_TIPS[(tip_offset + int(elapsed // 20)) % len(design.BREAK_TIPS)]
+            img, hits = design.render_break(remaining, total, tip, state["done"], state["hover"], self.scale)
+            state["photo"] = ImageTk.PhotoImage(img)
+            canvas.itemconfig(item, image=state["photo"])
+            ox, oy = px - img.width // 2, py - img.height // 2
+            state["hits"] = [(bid, (x0 + ox, y0 + oy, x1 + ox, y1 + oy)) for bid, (x0, y0, x1, y1) in hits]
+
+        def hit(x, y):
+            for bid, (x0, y0, x1, y1) in state["hits"]:
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    return bid
+            return None
+
+        def on_move(e):
+            h = hit(e.x, e.y)
+            if h != state["hover"]:
+                state["hover"] = h
+                canvas.config(cursor="hand2" if h else "arrow")
+                draw()
+
+        def finish(completed):
+            if self._break_win is not win:
+                return
+            self._break_win = None
+            if completed:
+                self.session_sec = 0
+                self.break_count += 1
+                self.next_break_at = self.config["break_interval_min"] * 60
+            else:
+                self.next_break_at = self.session_sec + self.config["snooze_min"] * 60
+            win.destroy()
+            self._update_tray()
+
+        def on_click(e):
+            action = hit(e.x, e.y)
+            if action == "skip":
+                finish(False)
+            elif action == "finish":
+                finish(True)
+
+        def loop():
+            if self._break_win is not win:
+                return
+            if not state["done"] and time.monotonic() >= end_at:
+                state["done"] = True
+                win.bell()
+            draw()
+            # stay above anything that tried to come to the front
+            win.attributes("-topmost", True)
+            win.lift()
+            win.after(1000, loop)
+
+        def fade(step=0, frames=16):
+            if self._break_win is not win:
+                return
+            win.attributes("-alpha", 0.96 * (1 - (1 - step / frames) ** 3))
+            if step < frames:
+                win.after(16, fade, step + 1, frames)
+
+        canvas.bind("<Motion>", on_move)
+        canvas.bind("<Button-1>", on_click)
+        draw()
+        win.focus_force()
+        fade()
+        win.after(1000, loop)
+
+    def _cmd_break_now(self):
+        self._start_break()
 
     # ---------------- dashboard ----------------
     def _dash_data(self):

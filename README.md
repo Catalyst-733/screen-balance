@@ -24,9 +24,18 @@ It's easy to sit down "for a minute" and look up three hours later. Screen Balan
 ## Features
 
 ### Break reminders
-After **50 minutes** of continuous use, a small popup slides in from the bottom-right corner. Take the break or snooze it for 10 minutes. Being away for **5 minutes** counts as a break and resets the timer automatically, and so does putting the PC to sleep.
+After **50 minutes** of continuous use, a small popup slides in from the bottom-right corner. You can snooze it for 10 minutes, or click **Taking a break** to start the break timer.
 
 <img src="docs/popup-break.png" alt="Break reminder popup" width="384">
+
+### Full-screen break timer
+When the break starts, every screen is dimmed and a countdown runs **on top of everything, including the taskbar**, until the break is over (5 minutes by default). It shows a new tip every 20 seconds: stretch, rest your eyes, drink water. When time's up it chimes and waits for you to click **Back to work**.
+
+Need to get back urgently? **End break early** is always there. Ending early counts as a snooze, so you'll be reminded again in 10 minutes. You can also start a break any time from the tray menu with **Take a break now**.
+
+<img src="docs/break-timer.png" alt="Full-screen break timer with a countdown ring" width="420">
+
+Being away from the PC for 5 minutes, or putting it to sleep, also counts as a break and resets the timer automatically.
 
 ### Daily time limit
 Set a daily screen-time budget (default **6 hours**). You get a heads-up at **80%**, a notice when you reach it, and a reminder every 30 minutes while you're over.
@@ -59,7 +68,7 @@ Everything is adjustable, including whether it starts with Windows.
 | Setting | Default | Range |
 |---|---|---|
 | Break reminder after | 50 min | 5–240 min |
-| Break length (away time that resets the timer) | 5 min | 1–60 min |
+| Break length (break timer, and away time that resets the timer) | 5 min | 1–60 min |
 | Snooze | 10 min | 1–60 min |
 | Daily limit (0 = off) | 6 h | 0–24 h |
 | Stop counting after no input for | 120 sec | 30–1800 sec |
@@ -101,14 +110,14 @@ A ring icon appears in the system tray. If you don't see it, click the **^** arr
 | Action | How |
 |---|---|
 | Open the dashboard | Double-click the tray icon |
-| Settings, pause reminders for 1 hour, start with Windows, quit | Right-click the tray icon |
+| Take a break now, settings, pause reminders for 1 hour, start with Windows, quit | Right-click the tray icon |
 | Quick look at today | Hover over the tray icon |
 
 ## Known limitations
 
 - **Videos count as idle.** If you watch something without touching the mouse or keyboard, time stops counting after 2 minutes. Raise *Idle after* in Settings if you want that time to count.
 - **Popups show on the main monitor**, even if you're working on another screen.
-- **Exclusive fullscreen games** may draw over the popups. Borderless/windowed mode works fine.
+- **Exclusive fullscreen games** may draw over the popups and the break timer. Borderless/windowed mode works fine.
 - **Windows only.** It uses Windows APIs to detect input and the active app.
 - **Tracking is by process name**, so all browser tabs count as one app (for example `chrome`).
 - **Not a parental-control tool.** It's built to help you, not to enforce limits. Anyone at the PC can quit it.
