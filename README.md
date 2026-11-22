@@ -11,7 +11,10 @@ It reminds you to take breaks, keeps an eye on your daily screen time, and shows
 ![License: MIT](https://img.shields.io/badge/License-MIT-37352F)
 ![100% offline](https://img.shields.io/badge/Data-100%25%20offline-448361)
 
-<img src="docs/dashboard.png" alt="Screen Balance dashboard in a Notion-like style: status, break countdown, breaks today, today's screen time, top apps and the last 7 days" width="780">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
+  <img src="docs/dashboard.png" alt="Screen Balance dashboard in a Notion-like style: status, break countdown, breaks today, today's screen time, top apps and the last 7 days" width="780">
+</picture>
 
 </div>
 
@@ -38,7 +41,10 @@ Need to get back urgently? **End break early** is always there. Ending early cou
 **Trigger a break whenever you want:** click **☕ Take a break now** on the dashboard, or choose it from the tray menu.
 
 <p>
-<img src="docs/break-timer.png" alt="Full-screen break timer with a countdown and a progress bar" width="380">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/break-timer-dark.png">
+  <img src="docs/break-timer.png" alt="Full-screen break timer with a countdown and a progress bar" width="380">
+</picture>
 <img src="docs/break-done.png" alt="Break complete screen: your 3rd break today" width="380">
 </p>
 
@@ -68,7 +74,10 @@ Switch to the **Analytics** tab for the detail:
 - **Activity by hour**: when in the day you use your PC, with your busiest hour
 - **Last 7 days table**: screen time, number of breaks and break time for each day
 
-<img src="docs/analytics.png" alt="Analytics tab: stat cards, activity by hour, and a 7-day table with breaks and break time" width="780">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/analytics-dark.png">
+  <img src="docs/analytics.png" alt="Analytics tab: stat cards, activity by hour, and a 7-day table with breaks and break time" width="780">
+</picture>
 
 Breaks are counted whether you finish the break timer, step away for 5+ minutes, or put the PC to sleep.
 
@@ -79,13 +88,19 @@ The icon is a small progress ring that fills with your day: blue while you're on
 
 <sub>On track · close to the limit · over the limit · reminders paused</sub>
 
+### Light and dark mode
+Choose **System**, **Light** or **Dark** under *Appearance* in Settings. **System** (the default) follows your Windows light/dark setting and switches automatically when you change it. The dashboard, popups, break screen, settings and even the window title bars follow along. The images in this README match your GitHub theme too.
+
 ### Only *real* use counts
 Time only counts while you're actually using the PC. Counting stops after 2 minutes without mouse or keyboard input, while the screen is locked, and while the PC sleeps.
 
 ### Settings
 Everything is adjustable, including whether it starts with Windows.
 
-<img src="docs/settings.png" alt="Settings window" width="400">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/settings-dark.png">
+  <img src="docs/settings.png" alt="Settings window" width="400">
+</picture>
 
 | Setting | Default | Range |
 |---|---|---|
@@ -95,6 +110,7 @@ Everything is adjustable, including whether it starts with Windows.
 | Daily limit (0 = off) | 6 h | 0–24 h |
 | Stop counting after no input for | 120 sec | 30–1800 sec |
 | Repeat the over-limit warning every | 30 min | 5–240 min |
+| Appearance | System | System, Light, Dark |
 
 ## Privacy
 

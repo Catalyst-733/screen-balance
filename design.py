@@ -11,8 +11,9 @@ import os
 
 from PIL import Image, ImageDraw, ImageFont
 
-# Notion-like palette
-THEME = {
+# Notion-like palettes
+LIGHT = {
+    "dark": False,
     "bg": (255, 255, 255),        # page
     "card": (247, 247, 245),      # sidebar / soft panel
     "card_hi": (241, 241, 239),   # callout, hover, stepper
@@ -27,10 +28,35 @@ THEME = {
     "good": (68, 131, 97),
     "warn": (217, 115, 13),
     "danger": (212, 76, 71),
+    "bar_other": (215, 214, 211),  # past days in charts
+    "bar_over": (235, 160, 156),   # past days over the limit
+    "bar_hour": (182, 206, 232),   # hourly bars
+    "key": (250, 251, 252),        # transparent color key for popups (never drawn)
+}
+DARK = {
+    "dark": True,
+    "bg": (25, 25, 25),
+    "card": (32, 32, 32),
+    "card_hi": (40, 40, 40),
+    "track": (47, 47, 47),
+    "border": (47, 47, 47),
+    "border_hi": (64, 64, 64),
+    "text": (213, 213, 211),
+    "muted": (155, 155, 152),
+    "dim": (110, 110, 108),
+    "a1": (35, 131, 226),
+    "a1_hover": (56, 146, 235),
+    "good": (82, 158, 114),
+    "warn": (219, 132, 62),
+    "danger": (223, 84, 82),
+    "bar_other": (72, 72, 72),
+    "bar_over": (122, 62, 58),
+    "bar_hour": (42, 82, 128),
+    "key": (24, 26, 28),
 }
 
 # (background, text) pairs, like Notion's select tags
-TAGS = {
+LIGHT_TAGS = {
     "gray": ((241, 241, 239), (120, 119, 116)),
     "blue": ((231, 243, 248), (51, 126, 169)),
     "green": ((237, 243, 236), (68, 131, 97)),
@@ -40,8 +66,32 @@ TAGS = {
     "purple": ((246, 243, 249), (144, 101, 176)),
     "pink": ((250, 241, 245), (193, 76, 138)),
 }
+DARK_TAGS = {
+    "gray": ((55, 55, 55), (175, 175, 172)),
+    "blue": ((31, 57, 88), (92, 164, 214)),
+    "green": ((36, 66, 49), (96, 172, 128)),
+    "orange": ((92, 55, 27), (222, 144, 86)),
+    "yellow": ((86, 66, 30), (214, 168, 84)),
+    "red": ((92, 42, 40), (232, 110, 106)),
+    "purple": ((60, 42, 82), (168, 128, 222)),
+    "pink": ((82, 38, 62), (226, 100, 168)),
+}
 APP_TAGS = ["blue", "purple", "green", "orange", "pink", "yellow"]
-POPUP_KEY = (250, 251, 252)  # transparent color key for borderless popups (never used in drawings)
+
+# the live palette; set_theme() swaps its contents in place so every module sees the change
+THEME = dict(LIGHT)
+TAGS = dict(LIGHT_TAGS)
+
+
+def set_theme(dark: bool) -> None:
+    THEME.clear()
+    THEME.update(DARK if dark else LIGHT)
+    TAGS.clear()
+    TAGS.update(DARK_TAGS if dark else LIGHT_TAGS)
+
+
+def popup_key():
+    return THEME["key"]
 
 _FONT_FILES = {
     "regular": ["segoeui.ttf"],
@@ -361,9 +411,9 @@ def _overview(p, data, hover, hits):
         if v > 0:
             h = max(3, (base - top_y) * v / peak)
             if limit and v > limit:
-                col = T["danger"] if d["today"] else (235, 160, 156)
+                col = T["danger"] if d["today"] else T["bar_over"]
             else:
-                col = T["a1"] if d["today"] else (215, 214, 211)
+                col = T["a1"] if d["today"] else T["bar_other"]
             p.rrect((cx - 12, base - h, cx + 12, base - 1), 3, fill=col)
         p.text((cx, base + 15), d["label"], 12, T["text"] if d["today"] else T["muted"],
                "semibold" if d["today"] else "regular", "mm")
@@ -407,7 +457,7 @@ def _analytics(p, data):
         cx = L + colw * (h + 0.5)
         if v > 0:
             bh = max(2, (base - top_y) * v / peak)
-            col = T["a1"] if h == cur else (182, 206, 232)
+            col = T["a1"] if h == cur else T["bar_hour"]
             p.rrect((cx - colw * 0.32, base - bh, cx + colw * 0.32, base - 1), 2, fill=col)
         if h % 6 == 0:
             p.text((cx, base + 14), ("12a", "6a", "12p", "6p")[h // 6], 11, T["muted"], anchor="mm")
@@ -462,7 +512,7 @@ _POPUP_ICONS = {"break": "☕", "warn": "⚠️", "limit": "⏰"}
 def render_popup(kind, title, message, buttons, hover, out_scale):
     """buttons: list of (id, label, primary). Returns (image, hits) with hits in output pixels."""
     T = THEME
-    p = Painter(POPUP_W, 400, out_scale * 2, POPUP_KEY)
+    p = Painter(POPUP_W, 400, out_scale * 2, T["key"])
     lines = p.wrap(message, 12.5, POPUP_W - 56 - 22)
     msg_top = 56
     btn_y0 = msg_top + len(lines) * 19 + 12
@@ -494,7 +544,7 @@ def render_popup(kind, title, message, buttons, hover, out_scale):
 
     img = p.img.crop((0, 0, round(POPUP_W * p.S), round(H * p.S)))
     out = img.resize((round(POPUP_W * out_scale), round(H * out_scale)), Image.LANCZOS)
-    flat = Image.new("RGB", out.size, POPUP_KEY)
+    flat = Image.new("RGB", out.size, T["key"])
     flat.paste(out, (0, 0), out)
     hits = [(bid, tuple(v * out_scale for v in box)) for bid, box in hits]
     return flat, hits
