@@ -140,6 +140,8 @@ Everything is adjustable, including whether it starts with Windows.
 | Stop counting after no input for | 120 sec | 30–1800 sec |
 | Repeat the over-limit warning every | 30 min | 5–240 min |
 | Appearance | System | System, Light, Dark |
+| Start with Windows | On (after you turn it on once) | On, Off |
+| Notify me when it starts | On | On, Off |
 
 ## Privacy
 
@@ -171,6 +173,10 @@ pythonw screen_balance.py
 An hourglass icon appears in the system tray. If you don't see it, click the **^** arrow on the taskbar.
 
 **4. (Optional) Start it with Windows:** turn on **Start with Windows** in Settings or in the tray menu.
+
+When it starts, a small Windows notification tells you **Screen Balance is running**, so you know it's on even when Windows hides the icon behind the **^** arrow. You can switch the notification off in Settings, and it never shows during Do not disturb.
+
+> **Can't see the icon?** Windows 11 hides new tray icons. To always show it, go to **Taskbar settings → Other system tray icons** and turn on the entry for Screen Balance (listed as *Python* or *pythonw*). In Task Manager's **Startup apps** it also appears as **pythonw.exe**, because Python runs the app.
 
 ### Using it
 
