@@ -485,6 +485,137 @@ class FastTimer:
                 pass
 
 
+class Animator:
+    """Plays short animations in lockstep with the display.
+
+    Each frame first waits for the next screen refresh (DwmFlush), then applies the new
+    state, so a 240 Hz monitor gets 240 evenly spaced frames per second, a 60 Hz one 60.
+    Progress is computed from real elapsed time, so a late frame catches up instead of
+    making the motion drag. Nothing runs (and no power is used) when nothing animates."""
+
+    def __init__(self, root):
+        self.root = root
+        self._anims = []
+        self._running = False
+        try:
+            self._vsync = ctypes.WinDLL("dwmapi").DwmFlush
+        except (OSError, AttributeError):
+            self._vsync = None
+
+    def play(self, duration, step):
+        """step(t) gets progress 0..1 each frame; return False to stop early."""
+        self._anims.append((time.perf_counter(), max(duration, 1e-3), step))
+        if not self._running:
+            self._running = True
+            if self._vsync is None:
+                FastTimer.acquire()
+            self.root.after(0, self._frame)
+
+    def _frame(self):
+        if self._vsync is not None:
+            try:
+                self._vsync()          # wait for the next display refresh
+            except OSError:
+                self._vsync = None
+                FastTimer.acquire()
+        now = time.perf_counter()
+        keep = []
+        for began, duration, step in self._anims:
+            t = min(1.0, (now - began) / duration)
+            try:
+                alive = step(t) is not False
+            except Exception:
+                log_error("animation frame failed:" + os.linesep + traceback.format_exc())
+                alive = False
+            if alive and t < 1.0:
+                keep.append((began, duration, step))
+        self._anims = keep
+        if keep:
+            self.root.after(0 if self._vsync is not None else 4, self._frame)
+        else:
+            self._running = False
+            if self._vsync is None:
+                FastTimer.release()
+
+
+class HoverLayer:
+    """Instant hover for a rendered page.
+
+    The page itself is always drawn without hover. For each button, its hovered look is
+    drawn once in the background, cropped to the button and cached; hovering then just
+    shows that small image on top of the page, on the next display frame, instead of
+    waiting ~25-50 ms for a full redraw."""
+
+    def __init__(self, app, canvas, name):
+        self.app, self.canvas, self.name = app, canvas, name
+        self.item = canvas.create_image(0, 0, anchor="nw", state="hidden")
+        self.cache = {}        # (context, bid) -> (PhotoImage, (x, y) in page pixels)
+        self.pending = set()
+        self.hits = []         # [(bid, box)] in page pixels
+        self.origin = (0, 0)   # where the page's top-left sits on the canvas
+        self.context = None
+        self.hover = None
+
+    def update(self, hits, origin, context, render_hovered):
+        """After each page render. render_hovered(bid) -> (image, hits), run in the background."""
+        self.hits, self.origin = hits, origin
+        if context != self.context:
+            self.context = context
+            if len(self.cache) > 64:
+                self.cache.clear()
+        for bid, box in hits:
+            ck = (context, bid)
+            if ck in self.cache or ck in self.pending:
+                continue
+            self.pending.add(ck)
+            self.app.renderer.submit(f"{self.name}:hover:{ck}", self._crop_job,
+                                     (render_hovered, bid, box), lambda res, ck=ck: self._store(ck, res))
+        self._show()
+
+    @staticmethod
+    def _crop_job(render_hovered, bid, box):
+        img, _ = render_hovered(bid)
+        x0, y0, x1, y1 = box
+        x0, y0 = max(0, int(x0) - 2), max(0, int(y0) - 2)
+        x1, y1 = min(img.width, math.ceil(x1) + 2), min(img.height, math.ceil(y1) + 2)
+        return img.crop((x0, y0, x1, y1)), (x0, y0)
+
+    def _store(self, ck, result):
+        self.pending.discard(ck)
+        try:
+            if not self.canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        crop, pos = result
+        self.cache[ck] = (ImageTk.PhotoImage(crop), pos)
+        if ck == (self.context, self.hover):
+            self._show()
+
+    def hit(self, x, y):
+        ox, oy = self.origin
+        for bid, (x0, y0, x1, y1) in self.hits:
+            if x0 + ox <= x <= x1 + ox and y0 + oy <= y <= y1 + oy:
+                return bid
+        return None
+
+    def set_hover(self, bid):
+        if bid != self.hover:
+            self.hover = bid
+            self._show()
+
+    def _show(self):
+        found = self.cache.get((self.context, self.hover)) if self.hover else None
+        if not found:
+            self.canvas.itemconfig(self.item, state="hidden")
+            return
+        photo, (x, y) = found
+        ox, oy = self.origin
+        self.canvas.coords(self.item, ox + x, oy + y)
+        self.canvas.itemconfig(self.item, image=photo, state="normal")
+        self.canvas.tag_raise(self.item)
+
+
 def ms_to_next_second(origin=None):
     """Delay (ms) until the next whole second (of the wall clock, or since `origin` on
     the uptime clock), so 1-second clocks tick on the boundary instead of drifting."""
@@ -549,6 +680,7 @@ class ScreenBalance:
         self.root.protocol("WM_SAVE_YOURSELF", self._save_safely)
         self.scale = self.root.winfo_fpixels("1i") / 96.0
         self.renderer = RenderWorker(self.root)
+        self.animator = Animator(self.root)
 
         self._dark_taskbar = taskbar_is_dark()
         self.icon = pystray.Icon(APP_NAME, design.render_tray(0, False, self._dark_taskbar), APP_NAME,
@@ -963,22 +1095,18 @@ class ScreenBalance:
         state = {"hover": None, "hits": [], "photo": None}
 
         item = canvas.create_image(0, 0, anchor="nw")
-
-        def apply(result):
-            if self._popup is not win or not win.winfo_exists():
-                return
-            img, hits = result
-            state["photo"] = ImageTk.PhotoImage(img)
-            state["hits"] = hits
-            canvas.config(width=img.width, height=img.height)
-            canvas.itemconfig(item, image=state["photo"])
+        # The popup never changes except on hover, so draw every hover look up front
+        # (a few ms each): hovering then swaps images on the very next display frame.
+        base_img, state["hits"] = design.render_popup(kind, title, message, buttons, None, self.scale, key_rgb)
+        looks = {None: ImageTk.PhotoImage(base_img)}
+        for bid, _ in state["hits"]:
+            img, _ = design.render_popup(kind, title, message, buttons, bid, self.scale, key_rgb)
+            looks[bid] = ImageTk.PhotoImage(img)
+        state["looks"] = looks
+        canvas.config(width=base_img.width, height=base_img.height)
 
         def draw(sync=False):
-            args = (kind, title, message, buttons, state["hover"], self.scale, key_rgb)
-            if sync:   # first frame: needed right away to size and place the window
-                apply(design.render_popup(*args))
-            else:      # hover changes: drawn in the background, UI stays fluid
-                self.renderer.submit("popup", design.render_popup, args, apply)
+            canvas.itemconfig(item, image=state["looks"].get(state["hover"], state["looks"][None]))
 
         def hit(x, y):
             for bid, (x0, y0, x1, y1) in state["hits"]:
@@ -1004,7 +1132,6 @@ class ScreenBalance:
             if self._popup is not win:
                 return
             self._popup = None
-            self.renderer.cancel("popup")
             win.destroy()
             if kind == "break" and action == "ok":
                 self._start_break()
@@ -1033,26 +1160,16 @@ class ScreenBalance:
         y_end = sh - h - round(64 * self.scale)
         slide = round(24 * self.scale)
 
-        began = time.perf_counter()
-        duration = 0.24
-
-        def animate():
-            # time-based easing: a late frame catches up instead of slowing the slide down
+        def slide_in(t):
+            # vsync-locked, time-based: one step per display refresh (240 per second on 240 Hz)
             if self._popup is not win or not win.winfo_exists():
-                FastTimer.release()
-                return
-            t = min(1.0, (time.perf_counter() - began) / duration)
+                return False
             ease = 1 - (1 - t) ** 3
             win.geometry(f"+{x}+{round(y_end + slide * (1 - ease))}")
             win.attributes("-alpha", ease)
-            if t < 1.0:
-                win.after(8, animate)
-            else:
-                FastTimer.release()
 
         win.geometry(f"+{x}+{y_end + slide}")
-        FastTimer.acquire()
-        animate()
+        self.animator.play(0.24, slide_in)
         win.bell()
 
     # ---------------- full-screen break timer ----------------
@@ -1093,10 +1210,24 @@ class ScreenBalance:
         canvas.pack()
         px, py = -vx + sw // 2, -vy + sh // 2   # main monitor centre, in canvas coords
         item = canvas.create_image(px, py, anchor="center")
-        state = {"hover": None, "hits": [], "photo": None, "done": False}
+        hover = HoverLayer(self, canvas, "break")
+        state = {"photo": None, "done": False}
         breaks_next = self._day()["breaks"] + 1   # "your 3rd break today"
 
-        def apply(result):
+        def page_args():
+            now = uptime()
+            elapsed = max(0.0, now - started)
+            tip = design.BREAK_TIPS[(tip_offset + int(elapsed // 20)) % len(design.BREAK_TIPS)]
+            if open_ended:
+                return (lambda h, a=(elapsed, total, tip): design.render_open_break(*a, h, self.scale))
+            remaining = max(0.0, end_at - now)
+            if state["done"]:
+                tip = "Your eyes, back and mind will thank you."
+            done = state["done"]
+            return (lambda h, a=(remaining, total, tip, done):
+                    design.render_break(*a, h, self.scale, breaks_today=breaks_next))
+
+        def apply(result, render):
             if self._break_win is not win:
                 return
             img, hits = result
@@ -1107,38 +1238,25 @@ class ScreenBalance:
                 canvas.configure(bg=page)
             state["photo"] = ImageTk.PhotoImage(img)
             canvas.itemconfig(item, image=state["photo"])
-            ox, oy = px - img.width // 2, py - img.height // 2
-            state["hits"] = [(bid, (x0 + ox, y0 + oy, x1 + ox, y1 + oy)) for bid, (x0, y0, x1, y1) in hits]
+            origin = (px - img.width // 2, py - img.height // 2)
+            context = (open_ended, state["done"], THEME["dark"], self.scale)
+            hover.update(hits, origin, context, render)
 
         def draw(sync=False):
-            now = uptime()
-            elapsed = max(0.0, now - started)
-            tip = design.BREAK_TIPS[(tip_offset + int(elapsed // 20)) % len(design.BREAK_TIPS)]
-            if open_ended:
-                fn, args = design.render_open_break, (elapsed, total, tip, state["hover"], self.scale)
-            else:
-                remaining = max(0.0, end_at - now)
-                if state["done"]:
-                    tip = "Your eyes, back and mind will thank you."
-                fn = lambda *a: design.render_break(*a, breaks_today=breaks_next)
-                args = (remaining, total, tip, state["done"], state["hover"], self.scale)
+            render = page_args()          # the page is always drawn without hover
             if sync:
-                apply(fn(*args))
-            else:   # drawn in the background so the countdown and hover never stutter
-                self.renderer.submit("break", fn, args, apply)
+                apply(render(None), render)
+            else:   # drawn in the background so the countdown never stutters
+                self.renderer.submit("break", render, (None,), lambda res: apply(res, render))
 
         def hit(x, y):
-            for bid, (x0, y0, x1, y1) in state["hits"]:
-                if x0 <= x <= x1 and y0 <= y <= y1:
-                    return bid
-            return None
+            return hover.hit(x, y)
 
         def on_move(e):
             h = hit(e.x, e.y)
-            if h != state["hover"]:
-                state["hover"] = h
+            if h != hover.hover:
                 canvas.config(cursor="hand2" if h else "arrow")
-                draw()
+                hover.set_hover(h)          # instant: pre-drawn, shown on the next frame
 
         def finish(action):
             if self._break_win is not win:
@@ -1182,18 +1300,11 @@ class ScreenBalance:
             # next update exactly when the clock's second changes (no drift, no skipped numbers)
             win.after(ms_to_next_second(started), loop)
 
-        fade_began = time.perf_counter()
-
-        def fade():
+        def fade(t):
+            # vsync-locked, time-based fade (one step per display refresh)
             if self._break_win is not win:
-                FastTimer.release()
-                return
-            t = min(1.0, (time.perf_counter() - fade_began) / 0.28)   # time-based, not frame-based
+                return False
             win.attributes("-alpha", 1 - (1 - t) ** 3)
-            if t < 1.0:
-                win.after(8, fade)
-            else:
-                FastTimer.release()
 
         canvas.bind("<Motion>", on_move)
         canvas.bind("<Button-1>", on_click)
@@ -1202,8 +1313,7 @@ class ScreenBalance:
                      lambda: finish("back" if open_ended else ("finish" if state["done"] else "skip")))
         draw(sync=True)
         win.focus_force()
-        FastTimer.acquire()
-        fade()
+        self.animator.play(0.28, fade)
         win.after(ms_to_next_second(started), loop)
 
     def _cmd_break_now(self):
@@ -1265,26 +1375,26 @@ class ScreenBalance:
         win.title("Screen Balance")
         win.configure(bg=hexc(THEME["bg"]))
         win.resizable(False, False)
-        self._stats_label = tk.Label(win, bg=hexc(THEME["bg"]), bd=0)
+        # a canvas: the page image, plus a hover layer on top for instant button feedback
+        self._stats_label = tk.Canvas(win, bg=hexc(THEME["bg"]), bd=0, highlightthickness=0)
         self._stats_label.pack()
+        self._dash_item = self._stats_label.create_image(0, 0, anchor="nw")
+        self._dash_layer = HoverLayer(self, self._stats_label, "dash")
 
         def dash_hit(x, y):
-            for bid, (x0, y0, x1, y1) in self._dash_hits:
-                if x0 <= x <= x1 and y0 <= y <= y1:
-                    return bid
-            return None
+            return self._dash_layer.hit(x, y)
 
         def on_move(e):
             h = dash_hit(e.x, e.y)
             if h != self._dash_hover:
                 self._dash_hover = h
                 self._stats_label.config(cursor="hand2" if h else "")
-                self._refresh_stats()
+                self._dash_layer.set_hover(h)     # instant, no redraw needed
 
         def on_leave(_):
             if self._dash_hover:
                 self._dash_hover = None
-                self._refresh_stats()
+                self._dash_layer.set_hover(None)
 
         def on_click(e):
             h = dash_hit(e.x, e.y)
@@ -1293,6 +1403,7 @@ class ScreenBalance:
                 self._refresh_stats()
             elif h in ("break_now", "open_break"):
                 self._dash_hover = None
+                self._dash_layer.set_hover(None)
                 self._start_break(open_ended=(h == "open_break"))
                 self._refresh_stats()
             elif h == "dnd":
@@ -1318,19 +1429,27 @@ class ScreenBalance:
         if win is None or not win.winfo_exists():
             self._stats_win = None
             return
-        args = (self._dash_data(), self.scale, self._dash_hover, self._dash_tab)
+        data, tab, scale = self._dash_data(), self._dash_tab, self.scale
+        # the page is drawn without hover; hovered buttons come from the hover layer
+        render = lambda hover, d=data, t=tab: design.render_dashboard(d, scale, hover, t)
+        context = (tab, data["state"] == "dnd", data["break_len_min"], THEME["dark"], scale)
         if sync:   # first frame when the window opens, so it appears at full size at once
-            self._apply_stats(design.render_dashboard(*args))
-        else:      # every later frame (ticks, hover, tabs) is drawn in the background
-            self.renderer.submit("dash", design.render_dashboard, args, self._apply_stats)
+            self._apply_stats(render(None), render, context)
+        else:      # every later frame (ticks, tabs) is drawn in the background
+            self.renderer.submit("dash", render, (None,),
+                                 lambda res: self._apply_stats(res, render, context))
 
-    def _apply_stats(self, result):
+    def _apply_stats(self, result, render, context):
         win = self._stats_win
         if win is None or not win.winfo_exists():
             return
         img, self._dash_hits = result
         self._stats_photo = ImageTk.PhotoImage(img)
-        self._stats_label.config(image=self._stats_photo)
+        c = self._stats_label
+        if int(c.cget("width")) != img.width or int(c.cget("height")) != img.height:
+            c.config(width=img.width, height=img.height)
+        c.itemconfig(self._dash_item, image=self._stats_photo)
+        self._dash_layer.update(self._dash_hits, (0, 0), context, render)
 
     # ---------------- settings ----------------
     def _cmd_settings(self):

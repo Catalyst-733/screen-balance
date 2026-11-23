@@ -121,7 +121,13 @@ Choose **System**, **Light** or **Dark** under *Appearance* in Settings. **Syste
 Time only counts while you're actually using the PC. Counting stops after 2 minutes without mouse or keyboard input, while the screen is locked, and while the PC sleeps. Store apps are counted under their own names, for example *Calculator* instead of *ApplicationFrameHost*.
 
 ### Smooth and lightweight
-All drawing happens on a background thread, so moving the mouse, hovering buttons and the countdowns stay smooth while the dashboard updates. Popups and the break screen animate at up to ~120 fps. The tray menu is only rebuilt when its text actually changes.
+All drawing happens on a background thread, so the UI never waits on a redraw.
+
+- **Animations are locked to your display's refresh rate:** every frame waits for the screen's next refresh, so the popup slide-in and the break-screen fade run at 240 fps on a 240 Hz monitor (144 on 144 Hz, 60 on 60 Hz) with evenly spaced frames.
+- **Hover is instant:** each button's hover look is drawn once in advance, then appears on the very next frame.
+- **The countdowns tick exactly on the second.**
+- **The tray menu** is only rebuilt when its text changes.
+- **No extra power use when idle:** nothing animates, and the PC can still sleep normally.
 
 ### Settings
 Everything is adjustable, including whether it starts with Windows.
