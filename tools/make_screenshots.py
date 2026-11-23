@@ -36,6 +36,13 @@ DEMO = dict(
 )
 
 
+_SPLIT = [("chrome", .30), ("Code", .25), ("Discord", .12), ("Figma", .10), ("Spotify", .08),
+          ("Notion", .06), ("Slack", .05), ("Steam", .04)]
+for _i, _d in enumerate(DEMO["week"]):
+    _d["apps"] = {n: _d["total"] * f * (0.6 + 0.8 * ((_i * 7 + k * 3) % 5) / 4) / 1.0
+                  for k, (n, f) in enumerate(_SPLIT)}
+
+
 def save_popup(name, img):
     # popups are flattened onto a color key for transparency; turn that into real alpha
     rgb = img.convert("RGB")
@@ -73,6 +80,7 @@ def main():
     design.set_theme(False)
     design.render_dashboard(DEMO, SCALE, tab="overview")[0].save(os.path.join(OUT, "dashboard.png"))
     design.render_dashboard(DEMO, SCALE, tab="analytics")[0].save(os.path.join(OUT, "analytics.png"))
+    design.render_dashboard(DEMO, SCALE, tab="apps")[0].save(os.path.join(OUT, "apps.png"))
     img, _ = design.render_break(0, 300, "Your eyes, back and mind will thank you.", True, None, SCALE,
                                  breaks_today=3)
     img.save(os.path.join(OUT, "break-done.png"))
@@ -103,6 +111,7 @@ def main():
     design.set_theme(True)
     design.render_dashboard(DEMO, SCALE, tab="overview")[0].save(os.path.join(OUT, "dashboard-dark.png"))
     design.render_dashboard(DEMO, SCALE, tab="analytics")[0].save(os.path.join(OUT, "analytics-dark.png"))
+    design.render_dashboard(DEMO, SCALE, tab="apps")[0].save(os.path.join(OUT, "apps-dark.png"))
     img, _ = design.render_break(187, 300, design.BREAK_TIPS[1], False, None, SCALE)
     img.save(os.path.join(OUT, "break-timer-dark.png"))
     design.render_open_break(412, 300, design.BREAK_TIPS[0], None, SCALE)[0]         .save(os.path.join(OUT, "open-break-dark.png"))

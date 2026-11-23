@@ -1842,6 +1842,7 @@ class ScreenBalance:
                 "breaks": rec.get("breaks", 0),
                 "break_sec": rec.get("break_sec", 0.0),
                 "longest": rec.get("longest", 0.0),
+                "apps": dict(rec.get("apps", {})),
                 "today": i == 0,
             })
         if self._dnd_active():
