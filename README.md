@@ -118,7 +118,14 @@ For moments when you need to be fully focused, such as an exam, a meeting, a pre
 Choose **System**, **Light** or **Dark** under *Appearance* in Settings. **System** (the default) follows your Windows light/dark setting and switches automatically when you change it. The dashboard, popups, break screen, settings and even the window title bars follow along. The images in this README match your GitHub theme too.
 
 ### Only *real* use counts
-Time only counts while you're actually using the PC. Counting stops after 2 minutes without mouse or keyboard input, while the screen is locked, and while the PC sleeps. Store apps are counted under their own names, for example *Calculator* instead of *ApplicationFrameHost*.
+Time only counts while you're actually using the PC. Counting stops after 2 minutes without mouse or keyboard input, while the screen is locked, and while the PC sleeps.
+
+**Videos count.** While a video plays, Screen Balance keeps counting even though you're not touching anything, and the dashboard shows **Watching video**. It detects this because browsers and video players ask Windows to keep the screen on while a video plays (and stop as soon as it's paused). The same goes for full-screen apps and presentations.
+
+- Watching never counts as a break, however long the video.
+- After a video ends, time is counted normally again until *Idle after* kicks in.
+- As a safety net, after 3 hours with no input at all it stops counting anyway, in case a "keep my PC awake" tool is holding the screen on.
+- You can switch it off in Settings (*Count videos as screen time*). Store apps are counted under their own names, for example *Calculator* instead of *ApplicationFrameHost*.
 
 ### Smooth and lightweight
 All drawing happens on a background thread, so the UI never waits on a redraw.
@@ -153,6 +160,7 @@ Everything is adjustable, including whether it starts with Windows.
 | Repeat the over-limit warning every | 30 min | 5–240 min |
 | Appearance | System | System, Light, Dark |
 | Start with Windows | On (after you turn it on once) | On, Off |
+| Count videos as screen time | On | On, Off |
 | Notify me when it starts | On | On, Off |
 
 ## Privacy
@@ -203,7 +211,7 @@ When it starts, a small Windows notification tells you **Screen Balance is runni
 
 ## Known limitations
 
-- **Videos count as idle.** If you watch something without touching the mouse or keyboard, time stops counting after 2 minutes. Raise *Idle after* in Settings if you want that time to count.
+- **Video detection relies on the "keep the screen on" signal.** Apps that hold it without playing video, such as Discord during a call or a "keep awake" utility, also count as watching. Audio-only players like Spotify don't hold it, so music on its own doesn't count.
 - **Popups show on the main monitor**, even if you're working on another screen.
 - **Exclusive fullscreen games** may draw over the popups and the break timer. Borderless/windowed mode works fine.
 - **Windows only.** It uses Windows APIs to detect input and the active app.
