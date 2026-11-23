@@ -120,7 +120,7 @@ Choose **System**, **Light** or **Dark** under *Appearance* in Settings. **Syste
 ### Only *real* use counts
 Time only counts while you're actually using the PC. Counting stops after 2 minutes without mouse or keyboard input, while the screen is locked, and while the PC sleeps.
 
-**Videos count.** While a video plays, Screen Balance keeps counting even though you're not touching anything, and the dashboard shows **Watching video**. It detects this because browsers and video players ask Windows to keep the screen on while a video plays (and stop as soon as it's paused). The same goes for full-screen apps and presentations.
+**Videos count.** While a video plays, Screen Balance keeps counting even though you're not touching anything, and the dashboard shows **Watching video**. It looks for two things at once: an app asking Windows to keep the screen on (browsers and video players do this while a video plays), or a full-screen app; **and** sound actually playing. Requiring sound matters because some apps (Discord, Medal, OBS, keep-awake tools) keep the screen on all the time, which on its own would hide real breaks.
 
 - Watching never counts as a break, however long the video.
 - After a video ends, time is counted normally again until *Idle after* kicks in.
@@ -181,7 +181,7 @@ Screen Balance is **100% offline**:
 ```powershell
 git clone https://github.com/Catalyst-733/screen-balance.git
 cd screen-balance
-python -m pip install --user -r requirements.txt
+python -m pip install --user -r requirements.txt   # needs Pillow 13+, which has no known vulnerabilities
 ```
 
 **3. Run it:** double-click **`Start Screen Balance.bat`**, or run:
@@ -211,7 +211,8 @@ When it starts, a small Windows notification tells you **Screen Balance is runni
 
 ## Known limitations
 
-- **Video detection relies on the "keep the screen on" signal.** Apps that hold it without playing video, such as Discord during a call or a "keep awake" utility, also count as watching. Audio-only players like Spotify don't hold it, so music on its own doesn't count.
+- **Video detection needs sound.** A muted video doesn't count as watching. Music playing while an app like Discord or Medal keeps the screen on can count as watching (up to 3 hours without input).
+- **Break popups follow the app's own Do not disturb**, not Windows' Focus / Do not disturb. The startup notification is a normal Windows notification, so Windows' setting does silence that one.
 - **Popups show on the main monitor**, even if you're working on another screen.
 - **Exclusive fullscreen games** may draw over the popups and the break timer. Borderless/windowed mode works fine.
 - **Windows only.** It uses Windows APIs to detect input and the active app.
@@ -225,6 +226,7 @@ When it starts, a small Windows notification tells you **Screen Balance is runni
 | `config.json` | Your settings |
 | `usage.json` | Per day (last 60 days): total and per-app time, activity by hour, breaks and break time, longest stretch |
 | `state.json` | Whether Do not disturb is on, and until when |
+| `usage.pending.json` | Only while `usage.json` is locked by another program: this session's time, merged in automatically later |
 | `error.log` | Only created if something goes wrong |
 
 To reset everything, quit the app and delete the `.screenbalance` folder.

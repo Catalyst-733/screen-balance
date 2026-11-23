@@ -1,3 +1,4 @@
-pystray
-Pillow
-psutil
+# Minimum versions are ones with no known security issues (checked with pip-audit).
+pystray>=0.19.5
+Pillow>=13.0.0
+psutil>=6.0.0
