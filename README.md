@@ -87,6 +87,8 @@ Switch to the **Analytics** tab for the detail:
 - **Activity by hour**: when in the day you use your PC, with your busiest hour
 - **Last 7 days table**: screen time, number of breaks and break time for each day
 
+**Add time by hand.** Used a laptop, your phone, or this PC while Screen Balance wasn't running? Click **＋ Add time** in Analytics. Pick the day (any of the last 7), a start time and how long, and optionally what it was. It's spread across the right hours, counts everywhere like tracked time, and the Screen time card shows how much was added. Each entry is listed in that window with a **Remove** link in case you get it wrong.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/analytics-dark.png">
   <img src="docs/analytics.png" alt="Analytics tab: stat cards, activity by hour, and a 7-day table with breaks and break time" width="780">
@@ -227,7 +229,7 @@ When it starts, a small Windows notification tells you **Screen Balance is runni
 |---|---|
 | `config.json` | Your settings |
 | `usage.json` | Per day (last 60 days): total and per-app time, activity by hour, breaks and break time, longest stretch |
-| `state.json` | Whether Do not disturb is on, and until when |
+| `state.json` | Whether Do not disturb is on and until when, plus your current stretch so a quick restart doesn't reset your break timer |
 | `usage.pending.json` | Only while `usage.json` is locked by another program: this session's time, merged in automatically later |
 | `error.log` | Only created if something goes wrong |
 
@@ -238,6 +240,7 @@ Your history is protected:
 - If a data file ever gets damaged, it's kept as a `*.corrupt-<date>` backup instead of being overwritten.
 - If it's temporarily locked (by antivirus or a backup tool), the app keeps tracking in memory and merges into the file once it can be read again.
 - It saves every 30 seconds and when Windows shuts down.
+- Starting it again while it's running (for example double-clicking **Start Screen Balance.bat**) restarts it cleanly: the running copy saves and steps aside, and your current stretch and break countdown carry over.
 - Anything unexpected is written to `error.log`.
 
 ## Project layout

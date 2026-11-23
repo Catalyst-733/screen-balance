@@ -305,7 +305,7 @@ def render_dashboard(data, out_scale, hover=None, tab="overview"):
     p.hline(L, R1, 105)
 
     if tab == "analytics":
-        _analytics(p, data)
+        _analytics(p, data, hover, hits)
     else:
         _overview(p, data, hover, hits)
 
@@ -452,7 +452,7 @@ def _overview(p, data, hover, hits):
                "semibold" if d["today"] else "regular", "mm")
 
 
-def _analytics(p, data):
+def _analytics(p, data, hover=None, hits=None):
     T = THEME
     week = data["week"]
     vals = [d["total"] for d in week]
@@ -463,7 +463,8 @@ def _analytics(p, data):
     # stat cards
     cards = [
         ("Screen time", fmt_dur(data["total"]),
-         f"Active since {data['first']}" if data.get("first") else "No activity yet"),
+         (f"incl. {fmt_dur(data['manual_today'])} added" if data.get("manual_today", 0) >= 60
+          else f"Active since {data['first']}" if data.get("first") else "No activity yet")),
         ("Breaks", str(n), f"{fmt_dur(data.get('break_sec', 0))} in total" if n else "None yet today"),
         ("Longest stretch", fmt_dur(data.get("longest", 0)), "Without a break"),
         ("Daily average", fmt_dur(avg), "Last 7 days"),
@@ -513,6 +514,13 @@ def _analytics(p, data):
 
     # week table
     p.text((R0, 224), "Last 7 days", 16, T["text"], "semibold", "lm")
+    # add time you spent on screen that the app didn't see
+    label = "Add time"
+    w = Painter.button_width(p, label, 12, icon=True)
+    box = (R1 - w, 210, R1, 238)
+    p.button(box, label, False, hover == "add_time", icon="➕", size=12)
+    if hits is not None:
+        hits.append(("add_time", box))
     cols = [("Day", R0, "lm"), ("Screen time", R0 + 52, "lm"), ("Breaks", R0 + 222, "mm"), ("Break time", R1, "rm")]
     for label, x, anchor in cols:
         p.text((x, 252), label, 12, T["muted"], anchor=anchor)
