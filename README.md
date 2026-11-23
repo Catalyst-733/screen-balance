@@ -114,6 +114,8 @@ For moments when you need to be fully focused, such as an exam, a meeting, a pre
 - It stays on through a restart or reboot until its end time.
 - When DND ends you get **at most one** catch-up reminder if a break is overdue. Nothing piles up.
 
+**Windows' own Do not disturb / Focus counts too.** While it's on (including during a Focus session from the Clock app), break popups and limit warnings stay quiet in exactly the same way, and the dashboard shows **Windows Do not disturb**. You can turn this off in Settings (*Respect Windows Do not disturb*).
+
 ### Light and dark mode
 Choose **System**, **Light** or **Dark** under *Appearance* in Settings. **System** (the default) follows your Windows light/dark setting and switches automatically when you change it. The dashboard, popups, break screen, settings and even the window title bars follow along. The images in this README match your GitHub theme too.
 
@@ -160,6 +162,7 @@ Everything is adjustable, including whether it starts with Windows.
 | Repeat the over-limit warning every | 30 min | 5–240 min |
 | Appearance | System | System, Light, Dark |
 | Start with Windows | On (after you turn it on once) | On, Off |
+| Respect Windows Do not disturb | On | On, Off |
 | Count videos as screen time | On | On, Off |
 | Notify me when it starts | On | On, Off |
 
@@ -212,7 +215,6 @@ When it starts, a small Windows notification tells you **Screen Balance is runni
 ## Known limitations
 
 - **Video detection needs sound.** A muted video doesn't count as watching. Music playing while an app like Discord or Medal keeps the screen on can count as watching (up to 3 hours without input).
-- **Break popups follow the app's own Do not disturb**, not Windows' Focus / Do not disturb. The startup notification is a normal Windows notification, so Windows' setting does silence that one.
 - **Popups show on the main monitor**, even if you're working on another screen.
 - **Exclusive fullscreen games** may draw over the popups and the break timer. Borderless/windowed mode works fine.
 - **Windows only.** It uses Windows APIs to detect input and the active app.
