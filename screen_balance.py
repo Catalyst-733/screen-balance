@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
     "idle_threshold_sec": 120,  # no input for this long = not counting time
     "over_limit_repeat_min": 30,
     "theme": "system",          # "system" (follow Windows), "light" or "dark"
+    "startup_notice": True,     # "Screen Balance is running" notification when it starts
 }
 THEMES = ("system", "light", "dark")
 
@@ -298,6 +299,8 @@ def clean_config(raw: dict) -> dict:
         cfg[key] = v if is_float else int(v)
     if raw.get("theme") in THEMES:
         cfg["theme"] = raw["theme"]
+    if isinstance(raw.get("startup_notice"), bool):
+        cfg["startup_notice"] = raw["startup_notice"]
     return cfg
 
 
@@ -775,7 +778,32 @@ class ScreenBalance:
         threading.Thread(target=self.icon.run, daemon=True).start()
         self.root.after(50, self._poll_commands)
         self.root.after(ms_to_next_second(), self._tick)
+        self.root.after(1500, self._startup_notice)
         self.root.mainloop()
+
+    def _startup_notice(self, tries=0):
+        """A Windows notification saying the app is running, since Windows 11 hides new
+        tray icons behind the ^ arrow. Respects Do not disturb and the Settings switch."""
+        if not self.config.get("startup_notice", True) or self._dnd_active():
+            return
+        if not self.icon.visible:
+            if tries < 20:   # the tray icon can take a moment to appear right after login
+                self.root.after(1000, self._startup_notice, tries + 1)
+            return
+        try:
+            self.icon.notify(f"{self._break_in_text(precise=False)} · today {fmt_dur(self._day()['total'])}.\n"
+                             "It lives in the tray: click ^ next to the clock if you don't see it.",
+                             "Screen Balance is running")
+            # take it back out of the notification centre after a while
+            self.root.after(15000, self._clear_notice)
+        except Exception:
+            log_error("startup notification failed:" + os.linesep + traceback.format_exc())
+
+    def _clear_notice(self):
+        try:
+            self.icon.remove_notification()
+        except Exception:
+            pass
 
     def _poll_commands(self):
         try:
@@ -1344,7 +1372,7 @@ class ScreenBalance:
         card_frame.pack(fill="x")
         tk.Frame(card_frame, bg=hexc(T["border"]), height=1).pack(fill="x")
         for i, (key, title, hint, lo, hi, step, unit) in enumerate(fields):
-            row = tk.Frame(card_frame, bg=card, padx=2, pady=10)
+            row = tk.Frame(card_frame, bg=card, padx=2, pady=7)
             row.pack(fill="x")
             tk.Frame(card_frame, bg=hexc(T["border"]), height=1).pack(fill="x")
             text = tk.Frame(row, bg=card)
@@ -1377,7 +1405,7 @@ class ScreenBalance:
 
         # appearance: System / Light / Dark
         theme = {"mode": self.config.get("theme", "system")}
-        look_row = tk.Frame(outer, bg=bg, pady=12)
+        look_row = tk.Frame(outer, bg=bg, pady=9)
         look_row.pack(fill="x")
         look_text = tk.Frame(look_row, bg=bg)
         look_text.pack(side="left")
@@ -1403,7 +1431,7 @@ class ScreenBalance:
         tk.Frame(outer, bg=hexc(T["border"]), height=1).pack(fill="x")
 
         # autostart toggle
-        auto_row = tk.Frame(outer, bg=bg, pady=14)
+        auto_row = tk.Frame(outer, bg=bg, pady=10)
         auto_row.pack(fill="x")
         auto = {"on": autostart_enabled()}
         tk.Label(auto_row, text="Start with Windows", bg=bg, fg=hexc(T["text"]),
@@ -1423,6 +1451,33 @@ class ScreenBalance:
         toggle.bind("<Button-1>", lambda e: (auto.update(on=not auto["on"]), draw_toggle()))
         draw_toggle()
 
+        # startup notification toggle
+        tk.Frame(outer, bg=hexc(T["border"]), height=1).pack(fill="x")
+        notice_row = tk.Frame(outer, bg=bg, pady=9)
+        notice_row.pack(fill="x")
+        notice = {"on": bool(self.config.get("startup_notice", True))}
+        notice_text = tk.Frame(notice_row, bg=bg)
+        notice_text.pack(side="left")
+        tk.Label(notice_text, text="Notify me when it starts", bg=bg, fg=hexc(T["text"]),
+                 font=("Segoe UI", 10)).pack(anchor="w")
+        tk.Label(notice_text, text="Shows that Screen Balance is running, even if its icon is hidden",
+                 bg=bg, fg=hexc(T["muted"]), font=("Segoe UI", 9)).pack(anchor="w")
+        notice_toggle = tk.Canvas(notice_row, width=34, height=20, bg=bg, highlightthickness=0, cursor="hand2")
+        notice_toggle.pack(side="right")
+
+        def draw_notice_toggle():
+            c = notice_toggle
+            c.delete("all")
+            on = notice["on"]
+            col = hexc(T["a1"]) if on else hexc(T["border_hi"])
+            c.create_oval(0, 0, 20, 20, fill=col, outline=col)
+            c.create_oval(14, 0, 34, 20, fill=col, outline=col)
+            c.create_rectangle(10, 0, 24, 20, fill=col, outline=col)
+            x = 16 if on else 2
+            c.create_oval(x, 2, x + 16, 18, fill="white", outline="white")
+        notice_toggle.bind("<Button-1>", lambda e: (notice.update(on=not notice["on"]), draw_notice_toggle()))
+        draw_notice_toggle()
+
         def close():
             self._settings_win = None
             win.destroy()
@@ -1433,6 +1488,7 @@ class ScreenBalance:
                 v = values[key]
                 self.config[key] = v if key == "daily_limit_hours" else int(v)
             self.config["theme"] = theme["mode"]
+            self.config["startup_notice"] = notice["on"]
             try:
                 save_json(CONFIG_PATH, self.config)
             except OSError:
