@@ -329,6 +329,8 @@ def _overview(p, data, hover, hits):
         p.tag(vx, 134, f"Do not disturb · {data.get('dnd_label', '')}".rstrip(" ·"), "purple")
     elif state == "idle":
         p.tag(vx, 134, "Idle", "gray")
+    elif state == "video":
+        p.tag(vx, 134, p.fit(f"Watching video · {data['current_app']}", 12, "regular", LR - vx - 14), "blue")
     else:
         p.tag(vx, 134, p.fit(f"Active · {data['current_app']}", 12, "regular", LR - vx - 14), "green")
 

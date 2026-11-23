@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
     "over_limit_repeat_min": 30,
     "theme": "system",          # "system" (follow Windows), "light" or "dark"
     "startup_notice": True,     # "Screen Balance is running" notification when it starts
+    "count_video": True,        # a playing video counts as screen time without any input
 }
 THEMES = ("system", "light", "dark")
 
@@ -56,6 +57,7 @@ TICK_MS = 1000  # 1 s so the "Break in" countdown ticks smoothly
 SAVE_EVERY_SEC = 30
 POPUP_TIMEOUT_SEC = 300  # an unanswered popup snoozes itself after 5 minutes
 MIN_OPEN_BREAK_SEC = 10  # an open break shorter than this was probably a misclick
+VIDEO_MAX_IDLE_SEC = 3 * 3600  # "keep the screen on" without any input for longer: stop counting
 KEEP_DAYS = 60
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -94,6 +96,26 @@ def uptime() -> float:
     """Seconds since boot. Unlike time.time() it ignores clock changes, and unlike
     time.monotonic() it is guaranteed to keep counting while the PC sleeps."""
     return kernel32.GetTickCount64() / 1000.0
+
+
+_powrprof = ctypes.WinDLL("powrprof")
+_shell32 = ctypes.WinDLL("shell32")
+
+
+def screen_kept_on() -> bool:
+    """True while some app asks Windows to keep the display on, which is what browsers and
+    video players do while a video plays (and stop doing when it's paused)."""
+    state = wt.ULONG()
+    rc = _powrprof.CallNtPowerInformation(16, None, 0, ctypes.byref(state), ctypes.sizeof(state))
+    return rc == 0 and bool(state.value & 0x2)   # SystemExecutionState / ES_DISPLAY_REQUIRED
+
+
+def fullscreen_app_running() -> bool:
+    """True while a full-screen app, game or presentation is in front."""
+    st = ctypes.c_int()
+    if _shell32.SHQueryUserNotificationState(ctypes.byref(st)) != 0:
+        return False
+    return st.value in (2, 3, 4)   # QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_MODE
 
 
 def session_locked() -> bool:
@@ -299,8 +321,9 @@ def clean_config(raw: dict) -> dict:
         cfg[key] = v if is_float else int(v)
     if raw.get("theme") in THEMES:
         cfg["theme"] = raw["theme"]
-    if isinstance(raw.get("startup_notice"), bool):
-        cfg["startup_notice"] = raw["startup_notice"]
+    for key in ("startup_notice", "count_video"):
+        if isinstance(raw.get(key), bool):
+            cfg[key] = raw[key]
     return cfg
 
 
@@ -699,6 +722,8 @@ class ScreenBalance:
         self.limit_notices = {}           # date -> {"80": bool, "100": bool, "last": ts}
         self.current_app = ""
         self.is_idle = False
+        self.is_watching = False          # a video (or full-screen app) is keeping the screen on
+        self._idle_offset = 0.0           # input-idle time that was spent watching
 
         self._last_tick = uptime()
         self._prev_idle = 0.0
@@ -980,7 +1005,7 @@ class ScreenBalance:
         if key != self._tray_key:      # only re-render when it visibly changes
             self._tray_key = key
             self.icon.icon = design.render_tray(ratio, paused, self._dark_taskbar)
-        status = "idle" if self.is_idle else "active"
+        status = "idle" if self.is_idle else ("watching video" if self.is_watching else "active")
         limit_txt = f" / {fmt_dur(limit)}" if limit else ""
         self.icon.title = (f"Screen Balance\n{self._break_in_text()}\n"
                            f"Today: {fmt_dur(total)}{limit_txt} ({status})")[:127]
@@ -1064,11 +1089,22 @@ class ScreenBalance:
             self._last_day = today_key()
             self._prune_usage()
 
-        idle = idle_seconds()
+        raw_idle = idle_seconds()
+        locked = session_locked()
+        # watching a video: no mouse/keyboard input, but you're still looking at the screen
+        watching = (self.config.get("count_video", True) and not locked
+                    and raw_idle < VIDEO_MAX_IDLE_SEC
+                    and (screen_kept_on() or fullscreen_app_running()))
+        if watching:
+            self._idle_offset = raw_idle          # time spent watching isn't time away
+        elif raw_idle < self._idle_offset:
+            self._idle_offset = 0.0               # you've touched something since: back to normal
+        idle = 0.0 if watching else max(0.0, raw_idle - self._idle_offset)
+        self.is_watching = watching
         break_len = self.config["break_length_min"] * 60
         # stop counting at the idle threshold, and never past the break length (otherwise the
         # same minutes would count as screen time AND as a break); a locked PC never counts
-        self.is_idle = (idle >= min(self.config["idle_threshold_sec"], break_len)) or session_locked()
+        self.is_idle = (idle >= min(self.config["idle_threshold_sec"], break_len)) or locked
 
         # a long enough idle stretch (or the PC sleeping that long) counts as a break
         if (idle >= break_len or gap >= break_len) and self.session_sec > 0:
@@ -1434,6 +1470,8 @@ class ScreenBalance:
             state = "dnd"
         elif self.is_idle:
             state = "idle"
+        elif self.is_watching:
+            state = "video"
         else:
             state = "active"
         return {
@@ -1704,32 +1742,37 @@ class ScreenBalance:
         toggle.bind("<Button-1>", lambda e: (auto.update(on=not auto["on"]), draw_toggle()))
         draw_toggle()
 
-        # startup notification toggle
-        tk.Frame(outer, bg=hexc(T["border"]), height=1).pack(fill="x")
-        notice_row = tk.Frame(outer, bg=bg, pady=9)
-        notice_row.pack(fill="x")
-        notice = {"on": bool(self.config.get("startup_notice", True))}
-        notice_text = tk.Frame(notice_row, bg=bg)
-        notice_text.pack(side="left")
-        tk.Label(notice_text, text="Notify me when it starts", bg=bg, fg=hexc(T["text"]),
-                 font=("Segoe UI", 10)).pack(anchor="w")
-        tk.Label(notice_text, text="Shows that Screen Balance is running, even if its icon is hidden",
-                 bg=bg, fg=hexc(T["muted"]), font=("Segoe UI", 9)).pack(anchor="w")
-        notice_toggle = tk.Canvas(notice_row, width=34, height=20, bg=bg, highlightthickness=0, cursor="hand2")
-        notice_toggle.pack(side="right")
+        def toggle_row(title, hint, initial):
+            """A switch row with a title and a one-line hint. Returns {"on": bool}."""
+            tk.Frame(outer, bg=hexc(T["border"]), height=1).pack(fill="x")
+            row = tk.Frame(outer, bg=bg, pady=9)
+            row.pack(fill="x")
+            value = {"on": bool(initial)}
+            text = tk.Frame(row, bg=bg)
+            text.pack(side="left")
+            tk.Label(text, text=title, bg=bg, fg=hexc(T["text"]), font=("Segoe UI", 10)).pack(anchor="w")
+            tk.Label(text, text=hint, bg=bg, fg=hexc(T["muted"]), font=("Segoe UI", 9)).pack(anchor="w")
+            c = tk.Canvas(row, width=34, height=20, bg=bg, highlightthickness=0, cursor="hand2")
+            c.pack(side="right")
 
-        def draw_notice_toggle():
-            c = notice_toggle
-            c.delete("all")
-            on = notice["on"]
-            col = hexc(T["a1"]) if on else hexc(T["border_hi"])
-            c.create_oval(0, 0, 20, 20, fill=col, outline=col)
-            c.create_oval(14, 0, 34, 20, fill=col, outline=col)
-            c.create_rectangle(10, 0, 24, 20, fill=col, outline=col)
-            x = 16 if on else 2
-            c.create_oval(x, 2, x + 16, 18, fill="white", outline="white")
-        notice_toggle.bind("<Button-1>", lambda e: (notice.update(on=not notice["on"]), draw_notice_toggle()))
-        draw_notice_toggle()
+            def draw():
+                c.delete("all")
+                col = hexc(T["a1"]) if value["on"] else hexc(T["border_hi"])
+                c.create_oval(0, 0, 20, 20, fill=col, outline=col)
+                c.create_oval(14, 0, 34, 20, fill=col, outline=col)
+                c.create_rectangle(10, 0, 24, 20, fill=col, outline=col)
+                x = 16 if value["on"] else 2
+                c.create_oval(x, 2, x + 16, 18, fill="white", outline="white")
+            c.bind("<Button-1>", lambda e: (value.update(on=not value["on"]), draw()))
+            draw()
+            return value
+
+        video = toggle_row("Count videos as screen time",
+                           "Watching a video counts even without touching the mouse or keyboard",
+                           self.config.get("count_video", True))
+        notice = toggle_row("Notify me when it starts",
+                            "Shows that Screen Balance is running, even if its icon is hidden",
+                            self.config.get("startup_notice", True))
 
         def close():
             if self._settings_win is not win:
@@ -1744,6 +1787,7 @@ class ScreenBalance:
                 self.config[key] = v if key == "daily_limit_hours" else int(v)
             self.config["theme"] = theme["mode"]
             self.config["startup_notice"] = notice["on"]
+            self.config["count_video"] = video["on"]
             try:
                 save_json(CONFIG_PATH, self.config)
             except OSError:
