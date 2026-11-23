@@ -289,7 +289,8 @@ def render_dashboard(data, out_scale, hover=None, tab="overview"):
 
     # view tabs
     x = L
-    for tid, glyph, label in (("overview", "▦", "Overview"), ("analytics", "◫", "Analytics")):
+    for tid, glyph, label in (("overview", "▦", "Overview"), ("analytics", "◫", "Analytics"),
+                              ("apps", "☰", "Apps")):
         w = p.textlen(label, 13, "semibold") + 30
         box = (x - 6, 72, x - 6 + w, 98)
         active = tab == tid
@@ -306,6 +307,8 @@ def render_dashboard(data, out_scale, hover=None, tab="overview"):
 
     if tab == "analytics":
         _analytics(p, data, hover, hits)
+    elif tab == "apps":
+        _apps(p, data)
     else:
         _overview(p, data, hover, hits)
 
@@ -450,6 +453,111 @@ def _overview(p, data, hover, hits):
             p.rrect((cx - 12, base - h, cx + 12, base - 1), 3, fill=col)
         p.text((cx, base + 15), d["label"], 12, T["text"] if d["today"] else T["muted"],
                "semibold" if d["today"] else "regular", "mm")
+
+
+# apps that are the app itself or the desktop, rather than something you "use"
+_SYSTEM_APPS = {"Screen Balance", "Lock screen", "Unknown"}
+
+
+def _apps(p, data):
+    """A Notion-style table: each app's time on each of the last 7 days, its average per
+    day and its week total, plus an "All apps" row with the daily totals."""
+    T = THEME
+    week = data["week"]
+    totals = {}
+    for d in week:
+        for name, secs in (d.get("apps") or {}).items():
+            if name not in _SYSTEM_APPS:
+                totals[name] = totals.get(name, 0.0) + secs
+    ranked = sorted(totals, key=totals.get, reverse=True)
+    shown = ranked[:9]
+    rest = ranked[9:]
+    active_days = max(1, sum(1 for d in week if d["total"] > 0))
+
+    def per_day(name):
+        return [(d.get("apps") or {}).get(name, 0.0) for d in week]
+
+    def other_per_day():
+        return [sum((d.get("apps") or {}).get(n, 0.0) for n in rest) for d in week]
+
+    rows = [(name, per_day(name)) for name in shown]
+    if rest:
+        rows.append((f"Other ({len(rest)})", other_per_day()))
+
+    # columns
+    name_x0, name_w = L, 136
+    day_x0 = name_x0 + name_w
+    day_w = 56
+    avg_x1 = day_x0 + 7 * day_w + 78
+    tot_x1 = R1
+
+    p.text((L, 126), "App usage", 16, T["text"], "semibold", "lm")
+    used = sum(1 for d in week if d["total"] > 0)
+    note = f"Last 7 days · average over {used} day{'s' if used != 1 else ''} used" if used else "Last 7 days"
+    p.text((R1, 126), note, 12, T["dim"], anchor="rm")
+    hy = 156
+    p.text((name_x0, hy), "App", 12, T["muted"], anchor="lm")
+    for i, d in enumerate(week):
+        cx = day_x0 + day_w * (i + 0.5)
+        p.text((cx, hy), d["label"], 12, T["text"] if d["today"] else T["muted"],
+               "semibold" if d["today"] else "regular", "mm")
+    p.text((avg_x1, hy), "Avg / day", 12, T["muted"], anchor="rm")
+    p.text((tot_x1, hy), "Week", 12, T["muted"], anchor="rm")
+    p.hline(L, R1, hy + 12)
+
+    if not rows:
+        p.text(((L + R1) / 2, 300), "No app usage recorded in the last 7 days yet", 13, T["dim"], anchor="mm")
+        return
+
+    peak = max(max(v) for _, v in rows) or 1
+    row_h = 29
+    y = hy + 12
+    for idx, (name, vals) in enumerate(rows):
+        cy = y + row_h / 2
+        is_other = name.startswith("Other (")
+        if not is_other:
+            tfg = TAGS[APP_TAGS[idx % len(APP_TAGS)]][1]
+            p.rrect((name_x0, cy - 4.5, name_x0 + 9, cy + 4.5), 2.5, fill=tfg)
+        p.text((name_x0 + (16 if not is_other else 0), cy), p.fit(name, 12.5, "regular", name_w - 22), 12.5,
+               T["muted"] if is_other else T["text"], anchor="lm")
+        for i, v in enumerate(vals):
+            cx = day_x0 + day_w * (i + 0.5)
+            if v >= 1:
+                # soft heat shading: busier days stand out at a glance
+                shade = lerp(T["bg"], T["a1"], 0.10 + 0.32 * (v / peak))
+                p.rrect((cx - day_w / 2 + 3, cy - 11, cx + day_w / 2 - 3, cy + 11), 4, fill=shade)
+                p.text((cx, cy), fmt_short(v), 11.5, T["text"], anchor="mm")
+            else:
+                p.text((cx, cy), "—", 11.5, T["dim"], anchor="mm")
+        total = sum(vals)
+        p.text((avg_x1, cy), fmt_short(total / active_days, long=True), 12, T["text"], anchor="rm")
+        p.text((tot_x1, cy), fmt_short(total, long=True), 12, T["muted"], anchor="rm")
+        y += row_h
+        p.hline(L, R1, y)
+
+    # all apps: the daily totals, the overall average and the week
+    cy = y + row_h / 2 + 2
+    p.text((name_x0, cy), "All apps", 12.5, T["text"], "semibold", "lm")
+    for i, d in enumerate(week):
+        cx = day_x0 + day_w * (i + 0.5)
+        p.text((cx, cy), fmt_short(d["total"]) if d["total"] >= 1 else "—", 11.5,
+               T["text"] if d["total"] >= 1 else T["dim"], "semibold", "mm")
+    week_total = sum(d["total"] for d in week)
+    p.text((avg_x1, cy), fmt_dur(week_total / active_days), 12, T["text"], "semibold", "rm")
+    p.text((tot_x1, cy), fmt_dur(week_total), 12, T["text"], "semibold", "rm")
+
+
+def fmt_short(seconds, long=False):
+    """Compact time for table cells: <1m, 45m, 1h05 (or 1h 05m with long=True)."""
+    if 0 < seconds < 60:
+        return "<1m"
+    if long:
+        return fmt_dur(seconds)
+    m = int(max(0, seconds) // 60)
+    h, m = divmod(m, 60)
+    if not h:
+        return f"{m}m"
+    return f"{h}h{m:02d}" if m else f"{h}h"
 
 
 def _analytics(p, data, hover=None, hits=None):

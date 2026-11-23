@@ -87,6 +87,20 @@ Switch to the **Analytics** tab for the detail:
 - **Activity by hour**: when in the day you use your PC, with your busiest hour
 - **Last 7 days table**: screen time, number of breaks and break time for each day
 
+### Dashboard: Apps
+The **Apps** tab is a table of your app usage for the last 7 days:
+
+- **One row per app** (your top 9 this week, the rest grouped as *Other*).
+- **One column per day** showing how long you used that app; busier days are shaded darker.
+- **Avg / day**: each app's daily average this week, counted over the days you actually used the PC.
+- **Week**: each app's total for the week.
+- **All apps**: your total for each day, your overall daily average and your week total.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/apps-dark.png">
+  <img src="docs/apps.png" alt="Apps tab: each app's time on each of the last 7 days, its daily average and week total" width="780">
+</picture>
+
 **Add time by hand.** Used a laptop, your phone, or this PC while Screen Balance wasn't running? Click **＋ Add time** in Analytics. Pick the day (any of the last 7), a start time and how long, and optionally what it was. It's spread across the right hours, counts everywhere like tracked time, and the Screen time card shows how much was added. Each entry is listed in that window with a **Remove** link in case you get it wrong.
 
 <picture>
