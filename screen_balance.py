@@ -29,7 +29,7 @@ import traceback
 
 import psutil
 import pystray
-from PIL import ImageTk
+from PIL import Image, ImageTk
 
 import design
 from design import THEME, hexc, fmt_dur
@@ -539,24 +539,31 @@ class Animator:
 
 
 class HoverLayer:
-    """Instant hover for a rendered page.
+    """Smooth hover for a rendered page.
 
-    The page itself is always drawn without hover. For each button, its hovered look is
-    drawn once in the background, cropped to the button and cached; hovering then just
-    shows that small image on top of the page, on the next display frame, instead of
-    waiting ~25-50 ms for a full redraw."""
+    The page itself is always drawn without hover. For each button, the background
+    draws its hovered look once, crops it to the button and pre-blends a short ramp of
+    in-between looks (page -> hovered). Hovering then fades that ramp in, and leaving
+    fades it back out, one step per display refresh, with no page redraw at all."""
+
+    STEPS = 12           # in-between looks per button
+    FADE_IN = 0.11       # seconds
+    FADE_OUT = 0.16
 
     def __init__(self, app, canvas, name):
         self.app, self.canvas, self.name = app, canvas, name
-        self.item = canvas.create_image(0, 0, anchor="nw", state="hidden")
-        self.cache = {}        # (context, bid) -> (PhotoImage, (x, y) in page pixels)
+        self.cache = {}        # (context, bid) -> ([PhotoImage ramp], (x, y) in page pixels)
         self.pending = set()
+        self.items = {}        # bid -> canvas image item
+        self.level = {}        # bid -> 0..1 (how "hovered" it currently looks)
         self.hits = []         # [(bid, box)] in page pixels
         self.origin = (0, 0)   # where the page's top-left sits on the canvas
         self.context = None
         self.hover = None
+        self._ticking = False
+        self._last = 0.0
 
-    def update(self, hits, origin, context, render_hovered):
+    def update(self, hits, origin, context, render_hovered, base_img):
         """After each page render. render_hovered(bid) -> (image, hits), run in the background."""
         self.hits, self.origin = hits, origin
         if context != self.context:
@@ -568,17 +575,22 @@ class HoverLayer:
             if ck in self.cache or ck in self.pending:
                 continue
             self.pending.add(ck)
-            self.app.renderer.submit(f"{self.name}:hover:{ck}", self._crop_job,
-                                     (render_hovered, bid, box), lambda res, ck=ck: self._store(ck, res))
-        self._show()
+            self.app.renderer.submit(f"{self.name}:hover:{ck}", self._ramp_job,
+                                     (render_hovered, bid, box, base_img),
+                                     lambda res, ck=ck: self._store(ck, res))
+        for bid in list(self.items):
+            self._draw(bid)
 
-    @staticmethod
-    def _crop_job(render_hovered, bid, box):
+    @classmethod
+    def _ramp_job(cls, render_hovered, bid, box, base_img):
         img, _ = render_hovered(bid)
         x0, y0, x1, y1 = box
         x0, y0 = max(0, int(x0) - 2), max(0, int(y0) - 2)
         x1, y1 = min(img.width, math.ceil(x1) + 2), min(img.height, math.ceil(y1) + 2)
-        return img.crop((x0, y0, x1, y1)), (x0, y0)
+        hov = img.crop((x0, y0, x1, y1)).convert("RGB")
+        base = base_img.crop((x0, y0, x1, y1)).convert("RGB")
+        ramp = [Image.blend(base, hov, (i + 1) / cls.STEPS) for i in range(cls.STEPS)]
+        return ramp, (x0, y0)
 
     def _store(self, ck, result):
         self.pending.discard(ck)
@@ -587,10 +599,10 @@ class HoverLayer:
                 return
         except tk.TclError:
             return
-        crop, pos = result
-        self.cache[ck] = (ImageTk.PhotoImage(crop), pos)
-        if ck == (self.context, self.hover):
-            self._show()
+        ramp, pos = result
+        self.cache[ck] = ([ImageTk.PhotoImage(im) for im in ramp], pos)
+        if ck[0] == self.context:
+            self._draw(ck[1])
 
     def hit(self, x, y):
         ox, oy = self.origin
@@ -600,20 +612,55 @@ class HoverLayer:
         return None
 
     def set_hover(self, bid):
-        if bid != self.hover:
-            self.hover = bid
-            self._show()
-
-    def _show(self):
-        found = self.cache.get((self.context, self.hover)) if self.hover else None
-        if not found:
-            self.canvas.itemconfig(self.item, state="hidden")
+        if bid == self.hover:
             return
-        photo, (x, y) = found
-        ox, oy = self.origin
-        self.canvas.coords(self.item, ox + x, oy + y)
-        self.canvas.itemconfig(self.item, image=photo, state="normal")
-        self.canvas.tag_raise(self.item)
+        self.hover = bid
+        if bid is not None:
+            self.level.setdefault(bid, 0.0)
+        if not self._ticking:
+            self._ticking = True
+            self._last = time.perf_counter()
+            self.app.animator.play(3600, self._tick)   # stops itself once everything settles
+
+    def _tick(self, _t):
+        now = time.perf_counter()
+        dt, self._last = now - self._last, now
+        moving = False
+        for bid, lv in list(self.level.items()):
+            target = 1.0 if bid == self.hover else 0.0
+            if lv != target:
+                rate = dt / (self.FADE_IN if target > lv else self.FADE_OUT)
+                lv = min(target, lv + rate) if target > lv else max(target, lv - rate)
+                self.level[bid] = lv
+                moving = moving or lv != target
+            self._draw(bid)
+            if lv == 0.0 and bid != self.hover:
+                del self.level[bid]
+        if not moving:
+            self._ticking = False
+            return False
+
+    def _draw(self, bid):
+        try:
+            canvas = self.canvas
+            item = self.items.get(bid)
+            lv = self.level.get(bid, 0.0)
+            found = self.cache.get((self.context, bid))
+            if lv <= 0.0 or not found:
+                if item is not None:
+                    canvas.itemconfig(item, state="hidden")
+                return
+            ramp, (x, y) = found
+            eased = 1 - (1 - lv) ** 2
+            photo = ramp[min(len(ramp) - 1, max(0, round(eased * len(ramp)) - 1))]
+            ox, oy = self.origin
+            if item is None:
+                item = self.items[bid] = canvas.create_image(0, 0, anchor="nw")
+            canvas.coords(item, ox + x, oy + y)
+            canvas.itemconfig(item, image=photo, state="normal")
+            canvas.tag_raise(item)
+        except tk.TclError:
+            pass   # the window was closed mid-fade
 
 
 def ms_to_next_second(origin=None):
@@ -685,6 +732,47 @@ class ScreenBalance:
         self._dark_taskbar = taskbar_is_dark()
         self.icon = pystray.Icon(APP_NAME, design.render_tray(0, False, self._dark_taskbar), APP_NAME,
                                  self._build_menu())
+
+    def _fade_window(self, win, to, duration, then=None):
+        """Ease a window's opacity to `to`, one step per display refresh; then() at the end."""
+        try:
+            start = float(win.attributes("-alpha"))
+        except tk.TclError:
+            return
+
+        def step(t):
+            try:
+                if not win.winfo_exists():
+                    return False
+                e = 1 - (1 - t) ** 3
+                win.attributes("-alpha", start + (to - start) * e)
+                if t >= 1.0 and then:
+                    then()
+            except tk.TclError:
+                return False
+        self.animator.play(duration, step)
+
+    def _fade_out_and_destroy(self, win, duration=0.14, slide=0):
+        """Fade (and optionally slide down) a window that's already been let go of, then destroy it."""
+        try:
+            x, y = win.winfo_x(), win.winfo_y()
+            start = float(win.attributes("-alpha"))
+        except tk.TclError:
+            return
+
+        def step(t):
+            try:
+                if not win.winfo_exists():
+                    return False
+                e = t * t            # ease-in: leave gently, then quickly
+                win.attributes("-alpha", start * (1 - e))
+                if slide:
+                    win.geometry(f"+{x}+{round(y + slide * e)}")
+                if t >= 1.0:
+                    win.destroy()
+            except tk.TclError:
+                return False
+        self.animator.play(duration, step)
 
     def _heal_windows(self):
         """If a window vanished behind our back (e.g. Alt+F4), forget it so nothing stays stuck."""
@@ -1132,7 +1220,9 @@ class ScreenBalance:
             if self._popup is not win:
                 return
             self._popup = None
-            win.destroy()
+            canvas.unbind("<Button-1>")
+            canvas.unbind("<Motion>")
+            self._fade_out_and_destroy(win, 0.16, slide=round(16 * self.scale))
             if kind == "break" and action == "ok":
                 self._start_break()
             elif kind == "break" and self.break_count == breaks_at_open:
@@ -1240,7 +1330,7 @@ class ScreenBalance:
             canvas.itemconfig(item, image=state["photo"])
             origin = (px - img.width // 2, py - img.height // 2)
             context = (open_ended, state["done"], THEME["dark"], self.scale)
-            hover.update(hits, origin, context, render)
+            hover.update(hits, origin, context, render, img)
 
         def draw(sync=False):
             render = page_args()          # the page is always drawn without hover
@@ -1277,7 +1367,9 @@ class ScreenBalance:
                     self.next_break_at = self.config["break_interval_min"] * 60
             self._prev_idle = 0.0
             self.renderer.cancel("break")
-            win.destroy()
+            canvas.unbind("<Button-1>")
+            canvas.unbind("<Motion>")
+            self._fade_out_and_destroy(win, 0.24)
             self._update_tray()
             if self._stats_win is not None:
                 self._refresh_stats()
@@ -1372,6 +1464,7 @@ class ScreenBalance:
             return
         win = tk.Toplevel(self.root)
         self._stats_win = win
+        win.attributes("-alpha", 0.0)         # faded in once the first frame is ready
         win.title("Screen Balance")
         win.configure(bg=hexc(THEME["bg"]))
         win.resizable(False, False)
@@ -1416,13 +1509,16 @@ class ScreenBalance:
 
         def on_close():
             self._stats_win = None
+            self._dash_shown_tab = None
+            self._dash_fading = False
             self.renderer.cancel("dash")
-            win.destroy()
+            self._fade_out_and_destroy(win, 0.13)
         win.protocol("WM_DELETE_WINDOW", on_close)
         self._refresh_stats(sync=True)
         style_titlebar(win)
         win.lift()
         win.focus_force()
+        self._fade_window(win, 1.0, 0.16)
 
     def _refresh_stats(self, sync=False):
         win = self._stats_win
@@ -1444,12 +1540,49 @@ class ScreenBalance:
         if win is None or not win.winfo_exists():
             return
         img, self._dash_hits = result
-        self._stats_photo = ImageTk.PhotoImage(img)
         c = self._stats_label
         if int(c.cget("width")) != img.width or int(c.cget("height")) != img.height:
             c.config(width=img.width, height=img.height)
-        c.itemconfig(self._dash_item, image=self._stats_photo)
-        self._dash_layer.update(self._dash_hits, (0, 0), context, render)
+        tab = context[0]
+        old = getattr(self, "_dash_pil", None)
+        new = img.convert("RGB")
+        self._dash_pil = new
+        if getattr(self, "_dash_shown_tab", None) not in (None, tab) and old is not None \
+                and old.size == new.size:
+            self._crossfade_dash(old, new)        # switching tabs: blend instead of snapping
+        elif not getattr(self, "_dash_fading", False):
+            self._stats_photo = ImageTk.PhotoImage(img)
+            c.itemconfig(self._dash_item, image=self._stats_photo)
+        self._dash_shown_tab = tab
+        self._dash_layer.update(self._dash_hits, (0, 0), context, render, img)
+
+    def _crossfade_dash(self, old, new, duration=0.2, steps=10):
+        """Blend the old tab into the new one. Each in-between look is built only when the
+        fade reaches it, so the work is spread over the frames instead of one big hitch."""
+        self._dash_fading = True
+        shown = {"i": -1}
+        target = {"img": new}
+
+        def step(t):
+            win = self._stats_win
+            if win is None or not win.winfo_exists():
+                self._dash_fading = False
+                return False
+            latest = self._dash_pil          # a fresh render may land mid-fade: fade into it
+            if latest is not target["img"] and latest.size == new.size:
+                target["img"] = latest
+            i = min(steps, max(1, round((1 - (1 - t) ** 3) * steps)))
+            if i != shown["i"]:
+                shown["i"] = i
+                frame = target["img"] if i >= steps else Image.blend(old, target["img"], i / steps)
+                self._stats_photo = ImageTk.PhotoImage(frame)
+                self._stats_label.itemconfig(self._dash_item, image=self._stats_photo)
+            if t >= 1.0:
+                self._dash_fading = False
+                self._stats_photo = ImageTk.PhotoImage(self._dash_pil)
+                self._stats_label.itemconfig(self._dash_item, image=self._stats_photo)
+
+        self.animator.play(duration, step)
 
     # ---------------- settings ----------------
     def _cmd_settings(self):
@@ -1462,6 +1595,7 @@ class ScreenBalance:
         card = bg  # Notion style: rows sit directly on the white page, split by thin lines
         win = tk.Toplevel(self.root)
         self._settings_win = win
+        win.attributes("-alpha", 0.0)         # faded in once it's built
         win.title("Screen Balance — Settings")
         win.configure(bg=bg)
         win.resizable(False, False)
@@ -1598,8 +1732,10 @@ class ScreenBalance:
         draw_notice_toggle()
 
         def close():
+            if self._settings_win is not win:
+                return
             self._settings_win = None
-            win.destroy()
+            self._fade_out_and_destroy(win, 0.13)
 
         def save():
             old_interval = self.config["break_interval_min"]
@@ -1637,6 +1773,7 @@ class ScreenBalance:
         style_titlebar(win)
         win.lift()
         win.focus_force()
+        self._fade_window(win, 1.0, 0.16)
 
     # ---------------- other commands ----------------
     def _cmd_toggle_autostart(self):

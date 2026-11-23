@@ -124,7 +124,13 @@ Time only counts while you're actually using the PC. Counting stops after 2 minu
 All drawing happens on a background thread, so the UI never waits on a redraw.
 
 - **Animations are locked to your display's refresh rate:** every frame waits for the screen's next refresh, so the popup slide-in and the break-screen fade run at 240 fps on a 240 Hz monitor (144 on 144 Hz, 60 on 60 Hz) with evenly spaced frames.
-- **Hover is instant:** each button's hover look is drawn once in advance, then appears on the very next frame.
+- **Everything eases instead of snapping:**
+  - Hover highlights fade in and out.
+  - Switching between Overview and Analytics crossfades.
+  - The dashboard and Settings fade in and out.
+  - Popups slide in and slide away.
+  - The break screen fades in and out.
+- **Hover starts on the very next frame:** each button's hover look, including the in-between steps of its fade, is drawn once in advance.
 - **The countdowns tick exactly on the second.**
 - **The tray menu** is only rebuilt when its text changes.
 - **No extra power use when idle:** nothing animates, and the PC can still sleep normally.
