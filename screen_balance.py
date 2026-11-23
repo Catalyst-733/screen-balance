@@ -128,12 +128,44 @@ def windows_dnd_on() -> bool:
     return status == 0 and size.value >= 4 and value.value != 0
 
 
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT), ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+
+user32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
+user32.MonitorFromWindow.restype = wt.HANDLE
+user32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+user32.GetMonitorInfoW.argtypes = [wt.HANDLE, ctypes.POINTER(_MONITORINFO)]
+user32.GetShellWindow.restype = wt.HWND
+user32.GetDesktopWindow.restype = wt.HWND
+user32.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+
+
 def fullscreen_app_running() -> bool:
-    """True while a full-screen app, game or presentation is in front."""
+    """True while a full-screen app, game, video or presentation is in front.
+
+    Checks the foreground window itself (does it cover its whole monitor?). Windows'
+    own "busy" flag isn't used for this, because Windows also raises it whenever its
+    Do not disturb / Focus is on, which has nothing to do with full screen."""
     st = ctypes.c_int()
-    if _shell32.SHQueryUserNotificationState(ctypes.byref(st)) != 0:
+    if _shell32.SHQueryUserNotificationState(ctypes.byref(st)) == 0 and st.value in (3, 4):
+        return True   # QUNS_RUNNING_D3D_FULL_SCREEN (exclusive full-screen game), QUNS_PRESENTATION_MODE
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd or hwnd in (user32.GetDesktopWindow(), user32.GetShellWindow()):
         return False
-    return st.value in (2, 3, 4)   # QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_MODE
+    cls = ctypes.create_unicode_buffer(64)
+    user32.GetClassNameW(hwnd, cls, 64)
+    if cls.value in ("Progman", "WorkerW", "Shell_TrayWnd"):   # desktop / taskbar
+        return False
+    r = wt.RECT()
+    mi = _MONITORINFO()
+    mi.cbSize = ctypes.sizeof(_MONITORINFO)
+    if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        return False
+    if not user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, 2), ctypes.byref(mi)):
+        return False
+    m = mi.rcMonitor
+    return r.left <= m.left and r.top <= m.top and r.right >= m.right and r.bottom >= m.bottom
 
 
 class AudioMeter:
@@ -279,6 +311,47 @@ def single_instance() -> bool:
     global _mutex
     _mutex = kernel32.CreateMutexW(None, False, f"Local\\{APP_NAME}_mutex")
     return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
+
+
+kernel32.CreateEventW.restype = wt.HANDLE
+kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.BOOL, wt.LPCWSTR]
+kernel32.OpenEventW.restype = wt.HANDLE
+kernel32.OpenEventW.argtypes = [wt.DWORD, wt.BOOL, wt.LPCWSTR]
+kernel32.SetEvent.argtypes = [wt.HANDLE]
+kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+QUIT_EVENT = f"Local\\{APP_NAME}_quit"
+_quit_event = None
+
+
+def listen_for_quit_requests():
+    """A named signal another copy can raise to ask this one to save and quit."""
+    global _quit_event
+    _quit_event = kernel32.CreateEventW(None, False, False, QUIT_EVENT)
+
+
+def quit_requested() -> bool:
+    return bool(_quit_event) and kernel32.WaitForSingleObject(_quit_event, 0) == 0
+
+
+def take_over_from_running_copy(timeout=10.0) -> bool:
+    """Starting while another copy runs (a restart, or after an update): ask it to save
+    and quit cleanly, then take its place. Nothing is lost, unlike killing it."""
+    if single_instance():
+        return True
+    ev = kernel32.OpenEventW(0x0002, False, QUIT_EVENT)     # EVENT_MODIFY_STATE
+    if not ev:
+        return False        # an old copy that doesn't understand the request: leave it be
+    kernel32.SetEvent(ev)
+    kernel32.CloseHandle(ev)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _mutex:
+            kernel32.CloseHandle(_mutex)
+        time.sleep(0.25)
+        if single_instance():
+            return True
+    return False
 
 
 def log_error(msg: str) -> None:
@@ -476,6 +549,15 @@ def clean_usage(raw: dict) -> dict:
             for k in ("first", "last"):
                 if isinstance(rec.get(k), str):
                     entry[k] = rec[k][:5]
+            manual = []
+            for m in rec.get("manual") or []:
+                try:
+                    manual.append({"id": str(m["id"])[:40], "start": str(m["start"])[:5],
+                                   "secs": _secs(m["secs"]), "label": str(m.get("label") or MANUAL_LABEL)[:60]})
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if manual:
+                entry["manual"] = manual
             out[day] = entry
         except (TypeError, ValueError, AttributeError, OverflowError):
             continue
@@ -499,7 +581,67 @@ def merge_usage(base: dict, extra: dict) -> dict:
             cur["first"] = rec["first"]
         if rec.get("last") and (not cur.get("last") or _hm(rec["last"]) > _hm(cur["last"])):
             cur["last"] = rec["last"]
+        if rec.get("manual"):
+            known = {m["id"] for m in cur.get("manual", [])}
+            cur.setdefault("manual", []).extend(m for m in rec["manual"] if m["id"] not in known)
     return out
+
+
+MANUAL_LABEL = "Added manually"
+
+
+def _spread_over_hours(rec, start_min, secs, sign):
+    """Add (sign=1) or take back (sign=-1) `secs` across the hours it covers, from start_min."""
+    t = start_min * 60.0
+    left = min(secs, 86400.0 - t)
+    applied = 0.0
+    while left > 0.5:
+        h = int(t // 3600)
+        chunk = min(left, (h + 1) * 3600.0 - t)
+        key = str(h)
+        rec["hours"][key] = max(0.0, rec["hours"].get(key, 0.0) + sign * chunk)
+        if rec["hours"][key] <= 0.5:
+            del rec["hours"][key]
+        t += chunk
+        left -= chunk
+        applied += chunk
+    return applied
+
+
+def add_manual_time(rec, start_min, secs, label):
+    """Record time you spent on screen that the app didn't see (another PC, before it was
+    installed...). It counts everywhere, like tracked time, and can be removed again."""
+    label = (label or "").strip()[:60] or MANUAL_LABEL
+    applied = _spread_over_hours(rec, start_min, secs, +1)
+    if applied <= 0:
+        return None
+    rec["total"] += applied
+    rec["apps"][label] = rec["apps"].get(label, 0.0) + applied
+    start = f"{start_min // 60}:{start_min % 60:02d}"
+    if not rec.get("first") or _hm(start) < _hm(rec["first"]):
+        rec["first"] = start
+    entry = {"id": f"m{int(time.time() * 1000)}{random.randrange(1000)}", "start": start,
+             "secs": applied, "label": label}
+    rec.setdefault("manual", []).append(entry)
+    return entry
+
+
+def remove_manual_time(rec, entry_id):
+    for i, m in enumerate(rec.get("manual", [])):
+        if m["id"] != entry_id:
+            continue
+        _spread_over_hours(rec, _hm(m["start"]), m["secs"], -1)
+        rec["total"] = max(0.0, rec["total"] - m["secs"])
+        left = rec["apps"].get(m["label"], 0.0) - m["secs"]
+        if left > 0.5:
+            rec["apps"][m["label"]] = left
+        else:
+            rec["apps"].pop(m["label"], None)
+        del rec["manual"][i]
+        if not rec["manual"]:
+            del rec["manual"]
+        return True
+    return False
 
 
 def _hm(stamp: str) -> int:
@@ -828,6 +970,7 @@ class ScreenBalance:
         self.break_count = 0              # bumps every time a real break is detected
         self.next_break_at = self.config["break_interval_min"] * 60
         self.dnd_until = self._load_dnd()  # Do not disturb: 0 = off, inf = until turned off
+        self._restore_session()
         self.limit_notices = {}           # date -> {"80": bool, "100": bool, "last": ts}
         self.current_app = ""
         self.is_idle = False
@@ -849,6 +992,7 @@ class ScreenBalance:
         self._break_open = False
         self._stats_win = None
         self._settings_win = None
+        self._addtime_win = None
         self._tray_key = None
         self._theme_checked = 0.0
         self.apply_theme()
@@ -922,7 +1066,7 @@ class ScreenBalance:
 
     def _heal_windows(self):
         """If a window vanished behind our back (e.g. Alt+F4), forget it so nothing stays stuck."""
-        for attr in ("_popup", "_break_win", "_stats_win", "_settings_win"):
+        for attr in ("_popup", "_break_win", "_stats_win", "_settings_win", "_addtime_win"):
             w = getattr(self, attr)
             try:
                 alive = w is not None and bool(w.winfo_exists())
@@ -1019,6 +1163,7 @@ class ScreenBalance:
         """Save without ever raising (a locked file must not stall the clock or block Quit)."""
         try:
             self.save()
+            self._save_state()
             return True
         except Exception:
             log_error("saving failed (will retry):" + os.linesep + traceback.format_exc())
@@ -1076,6 +1221,20 @@ class ScreenBalance:
     def _state_path():
         return os.path.join(DATA_DIR, "state.json")
 
+    def _restore_session(self):
+        """After a quick restart (shorter than a break), carry on with the same stretch and
+        break countdown instead of starting from zero. A longer gap was a real break."""
+        try:
+            sess = load_json(self._state_path(), {}).get("session") or {}
+            sec, nxt, saved = float(sess["sec"]), float(sess["next_break_at"]), float(sess["saved_at"])
+        except (UnreadableFile, KeyError, TypeError, ValueError, AttributeError):
+            return
+        gap = time.time() - saved
+        if not all(map(math.isfinite, (sec, nxt, saved))) or not 0 <= gap < self.config["break_length_min"] * 60:
+            return
+        self.session_sec = min(max(sec, 0.0), 86400.0)
+        self.next_break_at = min(max(nxt, 60.0), self.session_sec + 240 * 60)
+
     def _load_dnd(self):
         """Do not disturb survives restarts until its end time."""
         try:
@@ -1094,9 +1253,14 @@ class ScreenBalance:
         return until
 
     def _save_dnd(self):
+        self._save_state()
+
+    def _save_state(self):
+        """Do not disturb, plus the current stretch, so a restart doesn't reset your break timer."""
         value = "forever" if self.dnd_until == float("inf") else self.dnd_until
+        session = {"sec": self.session_sec, "next_break_at": self.next_break_at, "saved_at": time.time()}
         try:
-            save_json(self._state_path(), {"dnd_until": value})
+            save_json(self._state_path(), {"dnd_until": value, "session": session})
         except OSError:
             log_error("could not save Do not disturb state:\n" + traceback.format_exc())
 
@@ -1249,6 +1413,9 @@ class ScreenBalance:
         elapsed = gap if gap <= 30 else 0  # a big gap means sleep/hibernate, not screen time
         self._last_tick = now
         self._heal_windows()
+        if quit_requested():          # another copy is taking over: save and step aside
+            self._cmd_quit()
+            return
 
         # follow Windows switching between light and dark (checked every few seconds)
         if now - self._theme_checked >= 3 or now < self._theme_checked:
@@ -1705,6 +1872,7 @@ class ScreenBalance:
             "first": day.get("first"),
             "hours": [day["hours"].get(str(h), 0.0) for h in range(24)],
             "hour_now": dt.datetime.now().hour,
+            "manual_today": sum(m["secs"] for m in day.get("manual", [])),
         }
 
     def _cmd_stats(self):
@@ -1750,6 +1918,8 @@ class ScreenBalance:
                 self._dash_layer.set_hover(None)
                 self._start_break(open_ended=(h == "open_break"))
                 self._refresh_stats()
+            elif h == "add_time":
+                self._cmd_add_time()
             elif h == "dnd":
                 # dashboard button: 1 hour of quiet, or switch it off if it's on
                 self._set_dnd(0 if self._dnd_active() else 60)
@@ -2044,6 +2214,195 @@ class ScreenBalance:
         win.focus_force()
         self._fade_window(win, 1.0, 0.16)
 
+    # ---------------- add time by hand ----------------
+    def _cmd_add_time(self):
+        """Add screen time the app didn't see (another device, PC off, before installing).
+        Pick a day, a start time and how long; entries can be removed again."""
+        if self._addtime_win is not None:
+            self._addtime_win.lift()
+            self._addtime_win.focus_force()
+            return
+        T = THEME
+        bg, fg, muted = hexc(T["bg"]), hexc(T["text"]), hexc(T["muted"])
+        win = tk.Toplevel(self.root)
+        self._addtime_win = win
+        win.attributes("-alpha", 0.0)
+        win.title("Screen Balance — Add time")
+        win.configure(bg=bg)
+        win.resizable(False, False)
+        outer = tk.Frame(win, bg=bg, padx=28, pady=22)
+        outer.pack(fill="both", expand=True)
+        tk.Label(outer, text="Add time", bg=bg, fg=fg, font=("Segoe UI", 20, "bold")).pack(anchor="w")
+        tk.Label(outer, text="Screen time the app didn't see, like another device or while it wasn't running.",
+                 bg=bg, fg=muted, font=("Segoe UI", 10), wraplength=460, justify="left").pack(anchor="w", pady=(0, 14))
+
+        today = dt.date.today()
+        days = [today - dt.timedelta(days=i) for i in range(6, -1, -1)]
+        now = dt.datetime.now()
+        st = {"day": today, "start": max(0, now.hour - 1) * 60, "dur": 60}
+
+        def row(title):
+            tk.Frame(outer, bg=hexc(T["border"]), height=1).pack(fill="x")
+            r = tk.Frame(outer, bg=bg, pady=9)
+            r.pack(fill="x")
+            tk.Label(r, text=title, bg=bg, fg=fg, font=("Segoe UI", 10)).pack(side="left")
+            return r
+
+        # day picker (last 7 days)
+        day_row = row("Day")
+        seg = tk.Frame(day_row, bg=bg, highlightthickness=1, highlightbackground=hexc(T["border_hi"]))
+        seg.pack(side="right")
+        day_btns = {}
+
+        def draw_days():
+            for d, lbl in day_btns.items():
+                on = d == st["day"]
+                lbl.config(bg=hexc(T["card_hi"]) if on else bg, fg=fg if on else muted,
+                           font=("Segoe UI Semibold" if on else "Segoe UI", 9))
+
+        def pick_day(d):
+            st["day"] = d
+            draw_days()
+            refresh_list()
+            check()
+
+        for d in days:
+            text = "Today" if d == today else d.strftime("%a %d").replace(" 0", " ")
+            lbl = tk.Label(seg, text=text, bg=bg, cursor="hand2", padx=7, pady=3)
+            lbl.pack(side="left")
+            lbl.bind("<Button-1>", lambda e, d=d: pick_day(d))
+            day_btns[d] = lbl
+        draw_days()
+
+        def stepper(parent, get, change, fmt):
+            box = tk.Frame(parent, bg=bg, highlightthickness=1, highlightbackground=hexc(T["border_hi"]))
+            val = tk.Label(box, text=fmt(get()), width=8, bg=bg, fg=fg, font=("Segoe UI", 10))
+
+            def bump(sign):
+                change(sign)
+                val.config(text=fmt(get()))
+                check()
+            for sign, sym in ((-1, "−"), (1, "+")):
+                b = tk.Label(box, text=sym, bg=bg, fg=muted, cursor="hand2", font=("Segoe UI", 12), width=2)
+                b.bind("<Button-1>", lambda e, sg=sign: bump(sg))
+                b.bind("<Enter>", lambda e, b=b: b.config(bg=hexc(T["card_hi"]), fg=fg))
+                b.bind("<Leave>", lambda e, b=b: b.config(bg=bg, fg=muted))
+                b.pack(side="left")
+                if sign < 0:
+                    val.pack(side="left")
+            return box, val
+
+        # start time in 15-minute steps
+        start_row = row("From")
+        box, _ = stepper(start_row, lambda: st["start"],
+                         lambda sg: st.update(start=max(0, min(23 * 60 + 45, st["start"] + sg * 15))),
+                         lambda m: f"{m // 60}:{m % 60:02d}")
+        box.pack(side="right")
+
+        # duration: hours and minutes steppers, both showing the total
+        dur_row = row("How long")
+        labels = []
+
+        def set_dur(minutes):
+            st["dur"] = max(5, min(16 * 60, minutes))
+            for lbl in labels:
+                lbl.config(text=fmt_len(st["dur"]))
+
+        def fmt_len(m):
+            return f"{m // 60}h {m % 60:02d}m"
+        box_m, lbl_m = stepper(dur_row, lambda: st["dur"], lambda sg: set_dur(st["dur"] + sg * 5),
+                               lambda m: "± 5 min")
+        box_h, lbl_h = stepper(dur_row, lambda: st["dur"], lambda sg: set_dur(st["dur"] + sg * 60), fmt_len)
+        labels.append(lbl_h)
+        box_m.pack(side="right")
+        box_h.pack(side="right", padx=(0, 8))
+
+        what_row = row("What")
+        what = tk.Entry(what_row, bg=hexc(T["card_hi"]), fg=fg, insertbackground=fg, relief="flat",
+                        font=("Segoe UI", 10), width=24)
+        what.insert(0, MANUAL_LABEL)
+        what.pack(side="right", ipady=3)
+
+        tk.Frame(outer, bg=hexc(T["border"]), height=1).pack(fill="x")
+        msg = tk.Label(outer, text="", bg=bg, fg=hexc(T["danger"]), font=("Segoe UI", 9))
+        msg.pack(anchor="w", pady=(6, 0))
+
+        # what's already been added that day, each with Remove
+        tk.Label(outer, text="Added by hand that day", bg=bg, fg=muted,
+                 font=("Segoe UI Semibold", 9)).pack(anchor="w", pady=(6, 2))
+        listing = tk.Frame(outer, bg=bg)
+        listing.pack(fill="x")
+
+        def day_rec():
+            return self._day(st["day"].isoformat())
+
+        def refresh_list():
+            for w in listing.winfo_children():
+                w.destroy()
+            entries = self.usage.get(st["day"].isoformat(), {}).get("manual", [])
+            if not entries:
+                tk.Label(listing, text="Nothing yet", bg=bg, fg=hexc(T["dim"]),
+                         font=("Segoe UI", 9)).pack(anchor="w")
+            for m in entries:
+                r = tk.Frame(listing, bg=bg)
+                r.pack(fill="x", pady=1)
+                tk.Label(r, text=f"{m['start']}  ·  {fmt_dur(m['secs'])}  ·  {m['label']}", bg=bg, fg=fg,
+                         font=("Segoe UI", 9)).pack(side="left")
+                rm = tk.Label(r, text="Remove", bg=bg, fg=hexc(T["danger"]), cursor="hand2",
+                              font=("Segoe UI", 9, "underline"))
+                rm.pack(side="right")
+                rm.bind("<Button-1>", lambda e, mid=m["id"]: remove(mid))
+
+        def check():
+            if st["day"] == today and st["start"] > now.hour * 60 + now.minute:
+                msg.config(text="That start time hasn't happened yet today.")
+                return False
+            if st["start"] + st["dur"] > 24 * 60:
+                msg.config(text="That runs past midnight: only the part before 0:00 is added.")
+                return True
+            msg.config(text="")
+            return True
+
+        def finish_change():
+            self._save_safely()
+            self._tray_key = None
+            self._update_tray()
+            if self._stats_win is not None:
+                self._refresh_stats()
+            refresh_list()
+
+        def remove(mid):
+            if remove_manual_time(day_rec(), mid):
+                finish_change()
+
+        def close():
+            if self._addtime_win is not win:
+                return
+            self._addtime_win = None
+            self._fade_out_and_destroy(win, 0.13)
+
+        def add():
+            if self._addtime_win is not win or not check():
+                return
+            if add_manual_time(day_rec(), st["start"], st["dur"] * 60, what.get()):
+                finish_change()
+                close()
+
+        self._addtime_add = add          # for tests
+        self._addtime_state = st
+
+        btns = tk.Frame(outer, bg=bg)
+        btns.pack(fill="x", pady=(14, 0))
+        flat_button(btns, "Add", add, primary=True).pack(side="right")
+        flat_button(btns, "Cancel", close).pack(side="right", padx=(0, 8))
+        refresh_list()
+        check()
+        win.protocol("WM_DELETE_WINDOW", close)
+        style_titlebar(win)
+        win.lift()
+        win.focus_force()
+        self._fade_window(win, 1.0, 0.16)
+
     # ---------------- other commands ----------------
     def _cmd_toggle_autostart(self):
         set_autostart(not autostart_enabled())
@@ -2064,8 +2423,9 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except (AttributeError, OSError):
         pass
-    if not single_instance():
+    if not take_over_from_running_copy():
         return
+    listen_for_quit_requests()
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(CONFIG_PATH):
         save_json(CONFIG_PATH, DEFAULT_CONFIG)
