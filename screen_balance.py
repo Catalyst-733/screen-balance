@@ -118,6 +118,91 @@ def fullscreen_app_running() -> bool:
     return st.value in (2, 3, 4)   # QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_MODE
 
 
+class AudioMeter:
+    """Is any sound playing right now? Reads the Windows output peak meter through
+    Core Audio (raw COM via ctypes, no extra packages). Used to tell a video that's
+    actually playing apart from apps that just keep the screen on all the time
+    (Discord, Medal, OBS, keep-awake tools)."""
+
+    _CLSID_ENUM = "{BCDE0395-E52F-467C-8E3D-C4579291692E}"
+    _IID_ENUM = "{A95664D2-9614-4F35-A746-DE8DB63617E6}"
+    _IID_METER = "{C02216F6-8C67-4B5B-9D00-D008E73E0064}"
+
+    class _GUID(ctypes.Structure):
+        _fields_ = [("d1", wt.DWORD), ("d2", wt.WORD), ("d3", wt.WORD), ("d4", ctypes.c_ubyte * 8)]
+
+    def __init__(self):
+        self._ole32 = ctypes.WinDLL("ole32")
+        self._meter = None
+        self._device = None
+        self._opened_at = -1e9
+        self._last_sound = -1e9
+        self._inited = False
+
+    def _guid(self, text):
+        g = self._GUID()
+        self._ole32.CLSIDFromString(ctypes.c_wchar_p(text), ctypes.byref(g))
+        return g
+
+    @staticmethod
+    def _vcall(obj, index, *argtypes):
+        vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        return ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, *argtypes)(vtbl[index])
+
+    def _release(self, obj):
+        if obj:
+            try:
+                vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+                ctypes.WINFUNCTYPE(wt.ULONG, ctypes.c_void_p)(vtbl[2])(obj)
+            except Exception:
+                pass
+
+    def _open(self):
+        """(Re)connect to the current default speakers/headphones."""
+        self._release(self._meter)
+        self._release(self._device)
+        self._meter = self._device = None
+        self._opened_at = uptime()
+        if not self._inited:
+            self._ole32.CoInitializeEx(None, 2)   # COINIT_APARTMENTTHREADED (Tk thread)
+            self._inited = True
+        enum = ctypes.c_void_p()
+        if self._ole32.CoCreateInstance(ctypes.byref(self._guid(self._CLSID_ENUM)), None, 0x17,
+                                        ctypes.byref(self._guid(self._IID_ENUM)), ctypes.byref(enum)):
+            return
+        try:
+            dev = ctypes.c_void_p()
+            get_default = self._vcall(enum, 4, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))
+            if get_default(enum, 0, 0, ctypes.byref(dev)):      # eRender, eConsole
+                return
+            meter = ctypes.c_void_p()
+            activate = self._vcall(dev, 3, ctypes.POINTER(self._GUID), wt.DWORD, ctypes.c_void_p,
+                                   ctypes.POINTER(ctypes.c_void_p))
+            if activate(dev, ctypes.byref(self._guid(self._IID_METER)), 0x17, None, ctypes.byref(meter)):
+                self._release(dev)
+                return
+            self._device, self._meter = dev, meter
+        finally:
+            self._release(enum)
+
+    def sound_recently(self, within=15.0) -> bool:
+        """True if any sound played in the last `within` seconds (videos have quiet moments)."""
+        now = uptime()
+        try:
+            # reconnect now and then, so a switch to headphones/another output is picked up
+            if self._meter is None or now - self._opened_at > 60:
+                self._open()
+            if self._meter is not None:
+                peak = ctypes.c_float()
+                if self._vcall(self._meter, 3, ctypes.POINTER(ctypes.c_float))(self._meter, ctypes.byref(peak)):
+                    self._meter = None        # device gone: reconnect next time
+                elif peak.value > 0.0005:
+                    self._last_sound = now
+        except (OSError, ValueError):
+            self._meter = None
+        return now - self._last_sound <= within
+
+
 def session_locked() -> bool:
     """True while Windows is locked (the lock screen owns the input desktop)."""
     desk = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
@@ -249,6 +334,20 @@ def autostart_enabled() -> bool:
         return False
 
 
+def autostart_target_exists() -> bool:
+    """Does the startup entry still point at an existing copy of the app?"""
+    import shlex
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            cmd = winreg.QueryValueEx(k, APP_NAME)[0]
+        parts = shlex.split(cmd, posix=False)
+        script = parts[-1].strip('"') if parts else ""
+        return bool(script) and os.path.isfile(script)
+    except (OSError, ValueError):
+        return False
+
+
 def set_autostart(enabled: bool) -> None:
     import winreg
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
@@ -268,12 +367,12 @@ class UnreadableFile(Exception):
     """The file exists but can't be opened right now (locked by antivirus, backup, ...)."""
 
 
-def load_json(path, default):
+def load_json(path, default, attempts=5):
     """Read a JSON object. Missing file -> default. Damaged JSON -> kept aside as a backup,
     default returned. Locked file -> retried, then UnreadableFile (never treated as damaged,
     so a temporary lock can't wipe your history)."""
     last_err = None
-    for attempt in range(5):
+    for attempt in range(attempts):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -292,7 +391,8 @@ def load_json(path, default):
             return default
         except OSError as e:
             last_err = e
-            time.sleep(0.3 * (attempt + 1))
+            if attempt + 1 < attempts:
+                time.sleep(0.3 * (attempt + 1))
     raise UnreadableFile(f"{path}: {last_err}")
 
 
@@ -327,6 +427,14 @@ def clean_config(raw: dict) -> dict:
     return cfg
 
 
+def _secs(v) -> float:
+    """A sane, finite, non-negative number of seconds (at most one day)."""
+    v = float(v)
+    if not math.isfinite(v):
+        raise ValueError("not a finite number")
+    return min(max(v, 0.0), 86400.0)
+
+
 def clean_usage(raw: dict) -> dict:
     out = {}
     for day, rec in raw.items():
@@ -334,21 +442,24 @@ def clean_usage(raw: dict) -> dict:
             continue
         try:
             dt.date.fromisoformat(day)
-            apps = {str(k): float(v) for k, v in (rec.get("apps") or {}).items()}
-            hours = {str(int(k)): float(v) for k, v in (rec.get("hours") or {}).items() if 0 <= int(k) < 24}
+            apps = {str(k)[:200]: _secs(v) for k, v in (rec.get("apps") or {}).items()}
+            hours = {str(int(k)): _secs(v) for k, v in (rec.get("hours") or {}).items() if 0 <= int(k) < 24}
+            breaks = float(rec.get("breaks", 0))
+            if not math.isfinite(breaks):
+                raise ValueError("not a finite number")
             entry = {
-                "total": float(rec.get("total", 0)),
+                "total": _secs(rec.get("total", 0)),
                 "apps": apps,
                 "hours": hours,
-                "breaks": int(rec.get("breaks", 0)),
-                "break_sec": float(rec.get("break_sec", 0)),
-                "longest": float(rec.get("longest", 0)),
+                "breaks": int(min(max(breaks, 0), 10000)),
+                "break_sec": _secs(rec.get("break_sec", 0)),
+                "longest": _secs(rec.get("longest", 0)),
             }
             for k in ("first", "last"):
                 if isinstance(rec.get(k), str):
                     entry[k] = rec[k][:5]
             out[day] = entry
-        except (TypeError, ValueError, AttributeError):
+        except (TypeError, ValueError, AttributeError, OverflowError):
             continue
     return out
 
@@ -386,6 +497,8 @@ def save_json(path, data):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())       # on disk before it replaces the old file (power cuts)
     os.replace(tmp, path)
 
 
@@ -480,34 +593,6 @@ class RenderWorker:
             self._polling = False
 
 
-class FastTimer:
-    """Windows' timer normally fires every ~15.6 ms, capping animations at ~64 fps.
-    While an animation plays we ask for 1 ms resolution (~120 fps), then give it back
-    straight away so it doesn't cost battery the rest of the time."""
-
-    _users = 0
-
-    @classmethod
-    def acquire(cls):
-        if cls._users == 0:
-            try:
-                ctypes.WinDLL("winmm").timeBeginPeriod(1)
-            except OSError:
-                pass
-        cls._users += 1
-
-    @classmethod
-    def release(cls):
-        if cls._users <= 0:
-            return
-        cls._users -= 1
-        if cls._users == 0:
-            try:
-                ctypes.WinDLL("winmm").timeEndPeriod(1)
-            except OSError:
-                pass
-
-
 class Animator:
     """Plays short animations in lockstep with the display.
 
@@ -520,8 +605,10 @@ class Animator:
         self.root = root
         self._anims = []
         self._running = False
+        self._vsync_off_until = 0.0
         try:
             self._vsync = ctypes.WinDLL("dwmapi").DwmFlush
+            self._vsync.restype = ctypes.c_long   # HRESULT, checked by hand (0 = ok)
         except (OSError, AttributeError):
             self._vsync = None
 
@@ -530,17 +617,21 @@ class Animator:
         self._anims.append((time.perf_counter(), max(duration, 1e-3), step))
         if not self._running:
             self._running = True
-            if self._vsync is None:
-                FastTimer.acquire()
             self.root.after(0, self._frame)
 
     def _frame(self):
-        if self._vsync is not None:
-            try:
-                self._vsync()          # wait for the next display refresh
-            except OSError:
-                self._vsync = None
-                FastTimer.acquire()
+        delay = 8                      # fallback pacing when vsync isn't usable
+        if self._vsync is not None and uptime() >= self._vsync_off_until:
+            started = time.perf_counter()
+            hr = self._vsync()         # wait for the next display refresh
+            waited = time.perf_counter() - started
+            if hr != 0 or waited > 0.1:
+                # display off, locked, remote desktop... or it stalled: pace by timer for a while
+                self._vsync_off_until = uptime() + 30
+            elif waited < 0.0005:
+                delay = 4              # returned instantly: don't spin the CPU
+            else:
+                delay = 0              # just waited for the refresh: draw straight away
         now = time.perf_counter()
         keep = []
         for began, duration, step in self._anims:
@@ -554,11 +645,9 @@ class Animator:
                 keep.append((began, duration, step))
         self._anims = keep
         if keep:
-            self.root.after(0 if self._vsync is not None else 4, self._frame)
+            self.root.after(delay, self._frame)
         else:
             self._running = False
-            if self._vsync is None:
-                FastTimer.release()
 
 
 class HoverLayer:
@@ -712,6 +801,8 @@ class ScreenBalance:
             log_error(f"history unreadable for now, will merge later: {e}")
             self.usage = {}
             self._usage_pending_merge = True
+        if not self._usage_pending_merge:
+            self._merge_pending_file()
         self._prune_usage()
         self._last_day = today_key()
 
@@ -723,6 +814,7 @@ class ScreenBalance:
         self.current_app = ""
         self.is_idle = False
         self.is_watching = False          # a video (or full-screen app) is keeping the screen on
+        self.audio = AudioMeter()
         self._idle_offset = 0.0           # input-idle time that was spent watching
 
         self._last_tick = uptime()
@@ -755,8 +847,18 @@ class ScreenBalance:
         self.animator = Animator(self.root)
 
         self._dark_taskbar = taskbar_is_dark()
+        self._menu_text = self._menu_snapshot()
+        self._menu_lock = threading.Lock()
         self.icon = pystray.Icon(APP_NAME, design.render_tray(0, False, self._dark_taskbar), APP_NAME,
                                  self._build_menu())
+        # pystray rebuilds the menu on its own thread after each click, and we rebuild it on
+        # ours when the text changes: never let the two rebuild at the same moment
+        unlocked_update = self.icon.update_menu
+
+        def locked_update():
+            with self._menu_lock:
+                unlocked_update()
+        self.icon.update_menu = locked_update
 
     def _fade_window(self, win, to, duration, then=None):
         """Ease a window's opacity to `to`, one step per display refresh; then() at the end."""
@@ -857,14 +959,41 @@ class ScreenBalance:
         day["breaks"] += 1
         day["break_sec"] += seconds
 
+    @staticmethod
+    def _pending_path():
+        return os.path.join(DATA_DIR, "usage.pending.json")
+
+    def _merge_pending_file(self):
+        """Fold in time tracked during an earlier run while usage.json was locked."""
+        pend = self._pending_path()
+        if not os.path.exists(pend):
+            return
+        try:
+            extra = clean_usage(load_json(pend, {}, attempts=1))
+            self.usage = merge_usage(self.usage, extra)
+            save_json(USAGE_PATH, self.usage)
+            os.remove(pend)
+        except (UnreadableFile, OSError):
+            log_error("could not merge usage.pending.json yet:" + os.linesep + traceback.format_exc())
+
     def save(self):
         if self._usage_pending_merge:
             try:
-                on_disk = clean_usage(load_json(USAGE_PATH, {}))
+                # one quick try, no waiting: this runs on the UI thread
+                on_disk = clean_usage(load_json(USAGE_PATH, {}, attempts=1))
             except UnreadableFile:
-                return  # still locked: try again at the next save, never overwrite blindly
+                # still locked: keep this session's time in a side file so quitting or a
+                # crash can't lose it; it's merged in on the next successful start
+                save_json(self._pending_path(), self.usage)
+                return
             self.usage = merge_usage(on_disk, self.usage)
             self._usage_pending_merge = False
+            save_json(USAGE_PATH, self.usage)
+            try:
+                os.remove(self._pending_path())
+            except OSError:
+                pass
+            return
         save_json(USAGE_PATH, self.usage)
 
     def _save_safely(self):
@@ -880,31 +1009,45 @@ class ScreenBalance:
         return self.config["daily_limit_hours"] * 3600
 
     # ---------------- tray ----------------
+    def _menu_snapshot(self):
+        """Everything the tray menu shows, computed on the Tk thread. The menu itself is
+        built on pystray's thread, so it only ever reads this ready-made snapshot and never
+        touches live app data (which could change under it)."""
+        dnd = self._dnd_active()
+        return {
+            "today": f"Today: {fmt_dur(self._day()['total'])}",
+            "break_in": self._break_in_text(precise=False),
+            "since": f"Since last break: {fmt_dur(self.session_sec)}",
+            "timed": f"Take a {self.config['break_length_min']:g}-min break",
+            "dnd": f"Do not disturb ({self._dnd_label()})" if dnd else "Do not disturb",
+            "dnd_on": dnd,
+            "autostart": autostart_enabled(),
+        }
+
     def _build_menu(self):
         post = lambda cmd: (lambda icon, item: self.cmd_q.put(cmd))
+        m = lambda key: (lambda item: self._menu_text[key])
         return pystray.Menu(
-            pystray.MenuItem(lambda item: f"Today: {fmt_dur(self._day()['total'])}", post("stats"), default=True),
-            pystray.MenuItem(lambda item: self._break_in_text(precise=False), None, enabled=False),
-            pystray.MenuItem(lambda item: f"Since last break: {fmt_dur(self.session_sec)}", None, enabled=False),
+            pystray.MenuItem(m("today"), post("stats"), default=True),
+            pystray.MenuItem(m("break_in"), None, enabled=False),
+            pystray.MenuItem(m("since"), None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open dashboard", post("stats")),
-            pystray.MenuItem(lambda item: f"Take a {self.config['break_length_min']:g}-min break",
-                             post("break_now")),
+            pystray.MenuItem(m("timed"), post("break_now")),
             pystray.MenuItem("Take an open break (until I'm back)", post("open_break")),
             pystray.MenuItem(
-                lambda item: f"Do not disturb ({self._dnd_label()})" if self._dnd_active() else "Do not disturb",
+                m("dnd"),
                 pystray.Menu(
                     pystray.MenuItem("For 30 minutes", post("dnd_30")),
                     pystray.MenuItem("For 1 hour", post("dnd_60")),
                     pystray.MenuItem("For 2 hours", post("dnd_120")),
                     pystray.MenuItem("Until I turn it off", post("dnd_forever")),
                     pystray.Menu.SEPARATOR,
-                    pystray.MenuItem("Turn off", post("dnd_off"), enabled=lambda item: self._dnd_active()),
+                    pystray.MenuItem("Turn off", post("dnd_off"), enabled=m("dnd_on")),
                 ),
             ),
             pystray.MenuItem("Settings", post("settings")),
-            pystray.MenuItem("Start with Windows", post("toggle_autostart"),
-                             checked=lambda item: autostart_enabled()),
+            pystray.MenuItem("Start with Windows", post("toggle_autostart"), checked=m("autostart")),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", post("quit")),
         )
@@ -926,7 +1069,10 @@ class ScreenBalance:
             until = float(raw)
         except (TypeError, ValueError):
             return 0.0
-        return until if until > time.time() else 0.0
+        now = time.time()
+        if not math.isfinite(until) or until <= now or until > now + 7 * 86400:
+            return 0.0             # expired, or nonsense from a damaged/edited file
+        return until
 
     def _save_dnd(self):
         value = "forever" if self.dnd_until == float("inf") else self.dnd_until
@@ -1011,11 +1157,11 @@ class ScreenBalance:
                            f"Today: {fmt_dur(total)}{limit_txt} ({status})")[:127]
         # rebuild the tray menu only when something in it changed: rebuilding every second
         # could close or glitch the menu while you have it open
-        dnd = self._dnd_active()
-        sig = (self._break_in_text(precise=False), fmt_dur(self.session_sec), fmt_dur(total),
-               dnd, self._dnd_label() if dnd else "", self.config["break_length_min"])
+        snap = self._menu_snapshot()
+        sig = tuple(sorted(snap.items()))
         if sig != self._menu_sig:
             self._menu_sig = sig
+            self._menu_text = snap
             self.icon.update_menu()
 
     # ---------------- main loop ----------------
@@ -1092,8 +1238,12 @@ class ScreenBalance:
         raw_idle = idle_seconds()
         locked = session_locked()
         # watching a video: no mouse/keyboard input, but you're still looking at the screen
+        # Needs sound actually playing: some apps (Discord, Medal, OBS, keep-awake tools)
+        # keep the screen on all the time, which alone would hide every real break.
         watching = (self.config.get("count_video", True) and not locked
+                    and self._break_win is None
                     and raw_idle < VIDEO_MAX_IDLE_SEC
+                    and self.audio.sound_recently()
                     and (screen_kept_on() or fullscreen_app_running()))
         if watching:
             self._idle_offset = raw_idle          # time spent watching isn't time away
@@ -1115,7 +1265,7 @@ class ScreenBalance:
         # log breaks taken by stepping away (counted once you come back) or by sleeping the PC
         if self._break_win is None:
             if gap >= break_len:
-                self._record_break(gap)
+                self._record_break(max(gap, idle))   # idle time before the sleep counts too
                 # after waking, idle still includes the sleep until you type your PIN:
                 # don't log that same away stretch a second time
                 self._away_logged = True
@@ -1199,6 +1349,22 @@ class ScreenBalance:
 
     # ---------------- popup ----------------
     def _show_popup(self, kind, title, message):
+        try:
+            self._show_popup_impl(kind, title, message)
+        except Exception:
+            log_error("could not show a popup:" + os.linesep + traceback.format_exc())
+            self._discard_window("_popup")
+
+    def _discard_window(self, attr):
+        w = getattr(self, attr)
+        setattr(self, attr, None)
+        if w is not None:
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+
+    def _show_popup_impl(self, kind, title, message):
         snooze = self.config["snooze_min"]
         if kind == "break":
             buttons = [("snooze", f"Snooze {snooze} min", False), ("ok", "Taking a break", True)]
@@ -1300,6 +1466,13 @@ class ScreenBalance:
 
     # ---------------- full-screen break timer ----------------
     def _start_break(self, open_ended=False):
+        try:
+            self._start_break_impl(open_ended)
+        except Exception:
+            log_error("could not start the break screen:" + os.linesep + traceback.format_exc())
+            self._discard_window("_break_win")
+
+    def _start_break_impl(self, open_ended=False):
         """Cover every screen, on top of everything, until the break is over.
 
         Timed break: counts down from the break length, then waits for "Back to work".
@@ -1389,6 +1562,8 @@ class ScreenBalance:
                 return
             self._break_win = None
             took = max(0.0, uptime() - started)
+            if action == "skip" and not open_ended and took >= total:
+                action = "finish"   # the countdown already reached 0: it's a full break
             if action == "skip":
                 # ended a timed break early: acts like a snooze, not a break
                 self.next_break_at = self.session_sec + self.config["snooze_min"] * 60
@@ -1598,10 +1773,14 @@ class ScreenBalance:
         """Blend the old tab into the new one. Each in-between look is built only when the
         fade reaches it, so the work is spread over the frames instead of one big hitch."""
         self._dash_fading = True
+        self._dash_fade_gen = getattr(self, "_dash_fade_gen", 0) + 1
+        gen = self._dash_fade_gen
         shown = {"i": -1}
         target = {"img": new}
 
         def step(t):
+            if gen != self._dash_fade_gen:
+                return False                 # a newer tab switch took over
             win = self._stats_win
             if win is None or not win.winfo_exists():
                 self._dash_fading = False
@@ -1781,7 +1960,10 @@ class ScreenBalance:
             self._fade_out_and_destroy(win, 0.13)
 
         def save():
+            if self._settings_win is not win:
+                return     # already closing (e.g. Cancel then a quick click on Save)
             old_interval = self.config["break_interval_min"]
+            old_limit = self.config["daily_limit_hours"]
             for key, *_ in fields:
                 v = values[key]
                 self.config[key] = v if key == "daily_limit_hours" else int(v)
@@ -1802,7 +1984,8 @@ class ScreenBalance:
                 except OSError:
                     log_error("could not change Start with Windows:" + os.linesep + traceback.format_exc())
             self._menu_sig = None
-            self.limit_notices.pop(today_key(), None)
+            if self.config["daily_limit_hours"] != old_limit:
+                self.limit_notices.pop(today_key(), None)   # new limit: warn again at 80%/100%
             self._tray_key = None
             self._update_tray()
             if self._stats_win is not None:
@@ -1823,6 +2006,7 @@ class ScreenBalance:
     def _cmd_toggle_autostart(self):
         set_autostart(not autostart_enabled())
         self._menu_sig = None
+        self._menu_text = self._menu_snapshot()
         self.icon.update_menu()
 
     def _cmd_quit(self):
@@ -1843,8 +2027,8 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(CONFIG_PATH):
         save_json(CONFIG_PATH, DEFAULT_CONFIG)
-    if autostart_enabled():
-        set_autostart(True)  # keep the startup entry pointing at wherever the app lives now
+    if autostart_enabled() and not autostart_target_exists():
+        set_autostart(True)  # the copy it pointed at was moved or deleted: point at this one
     app = ScreenBalance()
     try:
         app.run()
