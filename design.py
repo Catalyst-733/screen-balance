@@ -327,6 +327,8 @@ def _overview(p, data, hover, hits):
     state = data["state"]
     if state == "dnd":
         p.tag(vx, 134, f"Do not disturb · {data.get('dnd_label', '')}".rstrip(" ·"), "purple")
+    elif state == "windows_dnd":
+        p.tag(vx, 134, "Windows Do not disturb", "purple")
     elif state == "idle":
         p.tag(vx, 134, "Idle", "gray")
     elif state == "video":
@@ -336,7 +338,7 @@ def _overview(p, data, hover, hits):
 
     vx = prop(166, "◷", "Break in")
     break_in = data.get("break_in")
-    if state == "dnd" or break_in is None:
+    if state in ("dnd", "windows_dnd") or break_in is None:
         p.tag(vx, 166, "Silenced", "gray")
     elif break_in <= 0:
         p.tag(vx, 166, "Now", "orange")

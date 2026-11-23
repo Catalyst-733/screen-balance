@@ -50,6 +50,7 @@ DEFAULT_CONFIG = {
     "theme": "system",          # "system" (follow Windows), "light" or "dark"
     "startup_notice": True,     # "Screen Balance is running" notification when it starts
     "count_video": True,        # a playing video counts as screen time without any input
+    "respect_windows_dnd": True,  # stay quiet while Windows' Do not disturb / Focus is on
 }
 THEMES = ("system", "light", "dark")
 
@@ -108,6 +109,23 @@ def screen_kept_on() -> bool:
     state = wt.ULONG()
     rc = _powrprof.CallNtPowerInformation(16, None, 0, ctypes.byref(state), ctypes.sizeof(state))
     return rc == 0 and bool(state.value & 0x2)   # SystemExecutionState / ES_DISPLAY_REQUIRED
+
+
+_ntdll = ctypes.WinDLL("ntdll")
+_WNF_QUIET_HOURS = 0x0D83063EA3BF1C75   # WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED
+
+
+def windows_dnd_on() -> bool:
+    """True while Windows' Do not disturb / Focus (Focus assist on Windows 10) is on.
+    Read from the shell's quiet-hours state: 0 = off, anything else = quiet."""
+    name = ctypes.c_ulonglong(_WNF_QUIET_HOURS)
+    stamp, value, size = wt.ULONG(), wt.DWORD(), wt.ULONG(4)
+    try:
+        status = _ntdll.NtQueryWnfStateData(ctypes.byref(name), None, None, ctypes.byref(stamp),
+                                            ctypes.byref(value), ctypes.byref(size))
+    except (OSError, AttributeError):
+        return False
+    return status == 0 and size.value >= 4 and value.value != 0
 
 
 def fullscreen_app_running() -> bool:
@@ -421,7 +439,7 @@ def clean_config(raw: dict) -> dict:
         cfg[key] = v if is_float else int(v)
     if raw.get("theme") in THEMES:
         cfg["theme"] = raw["theme"]
-    for key in ("startup_notice", "count_video"):
+    for key in ("startup_notice", "count_video", "respect_windows_dnd"):
         if isinstance(raw.get(key), bool):
             cfg[key] = raw[key]
     return cfg
@@ -814,6 +832,7 @@ class ScreenBalance:
         self.current_app = ""
         self.is_idle = False
         self.is_watching = False          # a video (or full-screen app) is keeping the screen on
+        self._win_dnd = False             # Windows' Do not disturb / Focus is on (and we respect it)
         self.audio = AudioMeter()
         self._idle_offset = 0.0           # input-idle time that was spent watching
 
@@ -1082,7 +1101,12 @@ class ScreenBalance:
             log_error("could not save Do not disturb state:\n" + traceback.format_exc())
 
     def _dnd_active(self):
+        """The app's own Do not disturb."""
         return time.time() < self.dnd_until
+
+    def _quiet(self):
+        """No popups right now: the app's DND, or Windows' Do not disturb / Focus."""
+        return self._dnd_active() or self._win_dnd
 
     def _dnd_label(self):
         """'until 15:30' or 'until turned off'."""
@@ -1123,8 +1147,8 @@ class ScreenBalance:
         self._set_dnd(0)
 
     def _break_in(self):
-        """Seconds of active use left before the next break reminder (None during DND)."""
-        if self._dnd_active():
+        """Seconds of active use left before the next break reminder (None while quiet)."""
+        if self._quiet():
             return None
         return self.next_break_at - self.session_sec
 
@@ -1135,6 +1159,8 @@ class ScreenBalance:
             return "On an open break" if self._break_open else "On a break"
         if self._dnd_active():
             return f"Do not disturb {self._dnd_label()}"
+        if self._win_dnd:
+            return "Windows Do not disturb is on"
         left = self._break_in()
         if left <= 0:
             return "Break in: now"
@@ -1146,7 +1172,7 @@ class ScreenBalance:
         total = self._day()["total"]
         limit = self._limit_sec()
         ratio = total / limit if limit else 0
-        paused = self._dnd_active()
+        paused = self._quiet()
         key = (round(ratio, 2), paused, self._dark_taskbar)
         if key != self._tray_key:      # only re-render when it visibly changes
             self._tray_key = key
@@ -1235,6 +1261,16 @@ class ScreenBalance:
             self._last_day = today_key()
             self._prune_usage()
 
+        # Windows' Do not disturb / Focus: going quiet closes a popup that's showing
+        # (the break reminder comes back once it's off), like the app's own DND
+        win_dnd = self.config.get("respect_windows_dnd", True) and windows_dnd_on()
+        if win_dnd != self._win_dnd:
+            self._win_dnd = win_dnd
+            if win_dnd and self._popup is not None:
+                self._discard_window("_popup")
+            self._tray_key = None
+            self._menu_sig = None
+
         raw_idle = idle_seconds()
         locked = session_locked()
         # watching a video: no mouse/keyboard input, but you're still looking at the screen
@@ -1310,7 +1346,7 @@ class ScreenBalance:
 
     # ---------------- rules ----------------
     def _check_break(self):
-        if self._dnd_active() or self._popup is not None:
+        if self._quiet() or self._popup is not None:
             return
         if self.session_sec >= self.next_break_at:
             self._show_popup(
@@ -1320,7 +1356,7 @@ class ScreenBalance:
             )
 
     def _check_limit(self):
-        if self._dnd_active() or self._popup is not None:
+        if self._quiet() or self._popup is not None:
             return
         total = self._day()["total"]
         limit = self._limit_sec()
@@ -1643,6 +1679,8 @@ class ScreenBalance:
             })
         if self._dnd_active():
             state = "dnd"
+        elif self._win_dnd:
+            state = "windows_dnd"
         elif self.is_idle:
             state = "idle"
         elif self.is_watching:
@@ -1946,6 +1984,9 @@ class ScreenBalance:
             draw()
             return value
 
+        respect_win = toggle_row("Respect Windows Do not disturb",
+                                 "No break popups while Windows' Do not disturb or Focus is on",
+                                 self.config.get("respect_windows_dnd", True))
         video = toggle_row("Count videos as screen time",
                            "Watching a video counts even without touching the mouse or keyboard",
                            self.config.get("count_video", True))
@@ -1970,6 +2011,7 @@ class ScreenBalance:
             self.config["theme"] = theme["mode"]
             self.config["startup_notice"] = notice["on"]
             self.config["count_video"] = video["on"]
+            self.config["respect_windows_dnd"] = respect_win["on"]
             try:
                 save_json(CONFIG_PATH, self.config)
             except OSError:
