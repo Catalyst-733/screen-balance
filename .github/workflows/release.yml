@@ -1,5 +1,6 @@
-# Publishes ScreenBalance.exe as a GitHub Release when a version tag is pushed:
-#   git tag v1.0.1 && git push origin v1.0.1
+# Publishes ScreenBalance.exe as a GitHub Release. Either:
+#   - Actions tab > Release > Run workflow, and type the version (e.g. v1.0.1), or
+#   - push a version tag: git tag v1.0.1 && git push origin v1.0.1
 # The download link https://github.com/Catalyst-733/screen-balance/releases/latest/download/ScreenBalance.exe
 # always points at the newest release.
 name: Release
@@ -7,6 +8,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. v1.0.1 (creates that tag on the selected branch)"
+        required: true
+        default: "v1.0.0"
 
 jobs:
   build:
@@ -25,10 +32,12 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.version || github.ref_name }}
         run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then echo "Version must look like v1.0.1"; exit 1; fi
           gh release create "$TAG" ScreenBalance.exe \
             --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
             --title "Screen Balance $TAG" \
             --notes "Download **ScreenBalance.exe** below and double-click it. No Python needed.
 
