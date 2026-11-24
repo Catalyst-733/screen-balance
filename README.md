@@ -201,6 +201,17 @@ Screen Balance is **100% offline**:
 
 To build it yourself on Windows: `pip install -r requirements.txt nuitka`, then run the same `python -m nuitka ...` command as in `.github/workflows/build-exe.yml`.
 
+### Publishing to the Microsoft Store
+
+The **Build Store package (MSIX)** workflow makes `ScreenBalance.msix`, the file you upload in Partner Center. The Store signs it, so you don't need a code-signing certificate. Steps:
+
+1. Create a developer account at [Partner Center](https://partner.microsoft.com/dashboard) (Apps and games), then **reserve the name** "Screen Balance" (pick another if it's taken).
+2. In Partner Center, open **Product management → Product identity** and copy *Package/Identity/Name*, *Package/Identity/Publisher* and *Package/Properties/PublisherDisplayName* into the repository variables `MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER` and `MSIX_PUBLISHER_DISPLAY_NAME` (GitHub: **Settings → Secrets and variables → Actions → Variables**).
+3. Run **Build Store package (MSIX)** from the Actions tab (**Run workflow**, version like `1.0.0.0`; raise it for each update) and download **ScreenBalance-msix**.
+4. Create a submission: upload the `.msix` under **Packages**, fill the listing from [`docs/store-listing.md`](docs/store-listing.md), use [`PRIVACY.md`](PRIVACY.md) as the privacy policy URL, and explain the `runFullTrust` capability with the text given there.
+
+In the Store version, **Start with Windows** uses Windows' startup task (you also see it under **Settings → Apps → Startup**), because Store apps can't use the registry. Your data folder stays `%USERPROFILE%\.screenbalance\`.
+
 ### Option B: run from source
 
 **1. Install Python 3.10+** from [python.org](https://www.python.org/downloads/) or the Microsoft Store.
@@ -275,9 +286,12 @@ design.py              Notion-style drawing for the dashboard, popups, break
                        timer and tray icon (Pillow, rendered at 2x)
 tools/
   make_screenshots.py  regenerates the images in docs/ from demo data
-  make_icon.py         draws the .exe icon
+  make_icon.py         draws the .exe icon and the Store logos
+packaging/msix/        Store package manifest and its extra requirements
 .github/workflows/
   build-exe.yml        compiles ScreenBalance.exe (Nuitka: Python -> C -> exe)
+  build-msix.yml       builds ScreenBalance.msix for the Microsoft Store
+PRIVACY.md             privacy policy (linked from the Store listing)
 docs/                  README images
 Start Screen Balance.bat
 ```

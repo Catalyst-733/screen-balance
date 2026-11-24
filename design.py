@@ -795,7 +795,7 @@ def render_break(remaining, total, tip, done, hover, out_scale, breaks_today=Non
 # --------------------------------------------------------------------------- #
 # Tray icon
 # --------------------------------------------------------------------------- #
-def render_tray(ratio, paused=False, dark_taskbar=True):
+def render_tray(ratio, paused=False, dark_taskbar=True, size=64):
     """Notion-style app tile: a rounded square with a minimal hourglass.
 
     The sand shows the day: it drains from the top bulb into the bottom one as you
@@ -820,7 +820,7 @@ def render_tray(ratio, paused=False, dark_taskbar=True):
         moon = palette["purple"][1] + (255,)
         d.ellipse(b(15, 15, 49, 49), fill=moon)
         d.ellipse(b(25, 9, 55, 39), fill=tile)
-        return img.resize((64, 64), Image.LANCZOS)
+        return img.resize((size, size), Image.LANCZOS)
 
     r = max(0.0, min(1.0, ratio))
     sand = (LIGHT if not dark_taskbar else DARK)["a1"] if ratio < 0.8 else (
@@ -846,4 +846,4 @@ def render_tray(ratio, paused=False, dark_taskbar=True):
     d.line([b(right, top), b(cx, mid), b(right, bot)], fill=ink, width=lw, joint="curve")
     d.rounded_rectangle(b(15, 12, 49, 17), radius=2.5 * S, fill=ink)
     d.rounded_rectangle(b(15, 47, 49, 52), radius=2.5 * S, fill=ink)
-    return img.resize((64, 64), Image.LANCZOS)
+    return img.resize((size, size), Image.LANCZOS)
