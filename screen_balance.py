@@ -26,6 +26,7 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import webbrowser
 
 import psutil
 import pystray
@@ -35,6 +36,7 @@ import design
 from design import THEME, hexc, fmt_dur
 
 APP_NAME = "ScreenBalance"
+REPO_URL = "https://github.com/Catalyst-733/screen-balance"
 # Not under %APPDATA%: Microsoft Store Python silently redirects writes there to a hidden folder.
 DATA_DIR = os.path.join(os.path.expanduser("~"), ".screenbalance")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -2273,6 +2275,12 @@ class ScreenBalance:
         btns.pack(fill="x", pady=(6, 0))
         flat_button(btns, "Save", save, primary=True).pack(side="right")
         flat_button(btns, "Cancel", close).pack(side="right", padx=(0, 8))
+        link = tk.Label(btns, text="GitHub \u2197", bg=bg, fg=hexc(T["muted"]), cursor="hand2",
+                        font=("Segoe UI", 9))
+        link.pack(side="left")
+        link.bind("<Button-1>", lambda e: webbrowser.open(REPO_URL))
+        link.bind("<Enter>", lambda e: link.config(fg=hexc(T["text"]), font=("Segoe UI", 9, "underline")))
+        link.bind("<Leave>", lambda e: link.config(fg=hexc(T["muted"]), font=("Segoe UI", 9)))
         win.protocol("WM_DELETE_WINDOW", close)
         style_titlebar(win)
         win.lift()
