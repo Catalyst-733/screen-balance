@@ -1,0 +1,37 @@
+# Publishes ScreenBalance.exe as a GitHub Release when a version tag is pushed:
+#   git tag v1.0.1 && git push origin v1.0.1
+# The download link https://github.com/Catalyst-733/screen-balance/releases/latest/download/ScreenBalance.exe
+# always points at the newest release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-exe.yml
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ScreenBalance-exe
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" ScreenBalance.exe \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Screen Balance $TAG" \
+            --notes "Download **ScreenBalance.exe** below and double-click it. No Python needed.
+
+          Windows SmartScreen may warn about an unknown publisher the first time, because the exe isn't code-signed: click **More info → Run anyway**.
+
+          Built from $GITHUB_SHA by the Release workflow."

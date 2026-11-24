@@ -11,6 +11,7 @@ on:
       - "tools/make_icon.py"
       - ".github/workflows/build-exe.yml"
   workflow_dispatch:
+  workflow_call:   # used by release.yml
 
 permissions:
   contents: read

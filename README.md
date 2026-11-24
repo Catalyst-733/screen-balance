@@ -195,9 +195,9 @@ Screen Balance is **100% offline**:
 
 ### Option A: download the app (no Python needed)
 
-1. Open the [Actions tab](https://github.com/Catalyst-733/screen-balance/actions/workflows/build-exe.yml), click the latest green **Build Windows exe** run, and download **ScreenBalance-exe** under *Artifacts* (you need to be signed in to GitHub).
-2. Unzip it and move `ScreenBalance.exe` somewhere permanent, for example `%LOCALAPPDATA%\Programs\Screen Balance\`.
-3. Double-click `ScreenBalance.exe`.
+1. **[Download ScreenBalance.exe](https://github.com/Catalyst-733/screen-balance/releases/latest/download/ScreenBalance.exe)** (latest version; all versions are on the [Releases page](https://github.com/Catalyst-733/screen-balance/releases)).
+2. Move it somewhere permanent, for example `%LOCALAPPDATA%\Programs\Screen Balance\`.
+3. Double-click it.
 
 > Windows SmartScreen may warn about an unknown publisher the first time, because the exe isn't code-signed. Click **More info → Run anyway**.
 
@@ -275,7 +275,7 @@ Your history is protected:
 
 ### The .exe
 
-`ScreenBalance.exe` is built by the **Build Windows exe** workflow on every push: [Nuitka](https://nuitka.net) translates the Python code to C and compiles it into a single native Windows program, and the workflow checks that it starts. To build it yourself on Windows, run `pip install -r requirements.txt nuitka`, then the same `python -m nuitka ...` command as in [`build-exe.yml`](.github/workflows/build-exe.yml).
+`ScreenBalance.exe` is built by the **Build Windows exe** workflow on every push: [Nuitka](https://nuitka.net) translates the Python code to C and compiles it into a single native Windows program, and the workflow checks that it starts. To publish a new version as a GitHub Release, push a version tag (`git tag v1.0.1 && git push origin v1.0.1`): the **Release** workflow builds the exe and attaches it to the release. To build it yourself on Windows, run `pip install -r requirements.txt nuitka`, then the same `python -m nuitka ...` command as in [`build-exe.yml`](.github/workflows/build-exe.yml).
 
 ### The Microsoft Store package
 
@@ -301,6 +301,7 @@ packaging/msix/        Store package manifest and its extra requirements
 .github/workflows/
   build-exe.yml        compiles ScreenBalance.exe (Nuitka: Python -> C -> exe)
   build-msix.yml       builds ScreenBalance.msix for the Microsoft Store
+  release.yml          publishes the exe as a GitHub Release for each v* tag
 PRIVACY.md             privacy policy (linked from the Store listing)
 docs/                  README images
 Start Screen Balance.bat
