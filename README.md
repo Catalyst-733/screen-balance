@@ -275,7 +275,7 @@ Your history is protected:
 
 ### The .exe
 
-`ScreenBalance.exe` is built by the **Build Windows exe** workflow on every push: [Nuitka](https://nuitka.net) translates the Python code to C and compiles it into a single native Windows program, and the workflow checks that it starts. To publish a new version as a GitHub Release, push a version tag (`git tag v1.0.1 && git push origin v1.0.1`): the **Release** workflow builds the exe and attaches it to the release. To build it yourself on Windows, run `pip install -r requirements.txt nuitka`, then the same `python -m nuitka ...` command as in [`build-exe.yml`](.github/workflows/build-exe.yml).
+`ScreenBalance.exe` is built by the **Build Windows exe** workflow on every push: [Nuitka](https://nuitka.net) translates the Python code to C and compiles it into a single native Windows program, and the workflow checks that it starts. To publish a new version as a GitHub Release, open **Actions → Release → Run workflow** and type the version (for example `v1.0.1`), or push a version tag: the **Release** workflow builds the exe and attaches it to the release. To build it yourself on Windows, run `pip install -r requirements.txt nuitka`, then the same `python -m nuitka ...` command as in [`build-exe.yml`](.github/workflows/build-exe.yml).
 
 ### The Microsoft Store package
 
