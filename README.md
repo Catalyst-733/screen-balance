@@ -67,10 +67,6 @@ Break interval (50 min), break length (5 min), snooze (10 min), daily limit (6 h
 - Apps are tracked by name, so all browser tabs count as one app.
 - It's a helper, not parental control: anyone can quit it.
 
-## For developers
-
-How the exe is built (Nuitka: Python → C → exe), how to publish a release or the Microsoft Store package, and the project layout: see [docs/BUILDING.md](docs/BUILDING.md).
-
 ## License
 
 [MIT](LICENSE)
