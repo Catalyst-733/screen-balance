@@ -193,6 +193,16 @@ Screen Balance is **100% offline**:
 
 ## Getting started
 
+### Option A: the ready-made .exe (no Python needed)
+
+`ScreenBalance.exe` is built automatically by GitHub Actions: [Nuitka](https://nuitka.net) translates the Python code to C and compiles it into a single native Windows program. Open the **Actions** tab, pick the latest green **Build Windows exe** run, download **ScreenBalance-exe** under *Artifacts*, unzip it and double-click `ScreenBalance.exe`. Put it somewhere permanent (for example `%LOCALAPPDATA%\Programs\Screen Balance\`) before turning on **Start with Windows**.
+
+> Windows SmartScreen may warn about an unknown publisher the first time, because the exe isn't code-signed. Click **More info → Run anyway**.
+
+To build it yourself on Windows: `pip install -r requirements.txt nuitka`, then run the same `python -m nuitka ...` command as in `.github/workflows/build-exe.yml`.
+
+### Option B: run from source
+
 **1. Install Python 3.10+** from [python.org](https://www.python.org/downloads/) or the Microsoft Store.
 
 **2. Download and install the dependencies:**
@@ -265,6 +275,9 @@ design.py              Notion-style drawing for the dashboard, popups, break
                        timer and tray icon (Pillow, rendered at 2x)
 tools/
   make_screenshots.py  regenerates the images in docs/ from demo data
+  make_icon.py         draws the .exe icon
+.github/workflows/
+  build-exe.yml        compiles ScreenBalance.exe (Nuitka: Python -> C -> exe)
 docs/                  README images
 Start Screen Balance.bat
 ```
