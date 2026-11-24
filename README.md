@@ -161,7 +161,7 @@ All drawing happens on a background thread, so the UI never waits on a redraw.
 - **No extra power use when idle:** nothing animates, and the PC can still sleep normally.
 
 ### Settings
-Everything is adjustable, including whether it starts with Windows.
+Everything is adjustable, including whether it starts with Windows. The small **GitHub ↗** link at the bottom opens this page.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/settings-dark.png">
@@ -186,31 +186,22 @@ Everything is adjustable, including whether it starts with Windows.
 
 Screen Balance is **100% offline**:
 
-- It makes no network connections and has no account, telemetry or ads.
+- It makes no network connections and has no account, telemetry or ads. (The GitHub link in Settings only opens this page in your browser when you click it.)
 - It records **only app names and minutes**. No window titles, URLs, keystrokes or screenshots.
 - Everything stays in one folder on your PC: `%USERPROFILE%\.screenbalance\`
 - It needs no administrator rights.
 
 ## Getting started
 
-### Option A: the ready-made .exe (no Python needed)
+### Option A: download the app (no Python needed)
 
-`ScreenBalance.exe` is built automatically by GitHub Actions: [Nuitka](https://nuitka.net) translates the Python code to C and compiles it into a single native Windows program. Open the **Actions** tab, pick the latest green **Build Windows exe** run, download **ScreenBalance-exe** under *Artifacts*, unzip it and double-click `ScreenBalance.exe`. Put it somewhere permanent (for example `%LOCALAPPDATA%\Programs\Screen Balance\`) before turning on **Start with Windows**.
+1. Open the [Actions tab](https://github.com/Catalyst-733/screen-balance/actions/workflows/build-exe.yml), click the latest green **Build Windows exe** run, and download **ScreenBalance-exe** under *Artifacts* (you need to be signed in to GitHub).
+2. Unzip it and move `ScreenBalance.exe` somewhere permanent, for example `%LOCALAPPDATA%\Programs\Screen Balance\`.
+3. Double-click `ScreenBalance.exe`.
 
 > Windows SmartScreen may warn about an unknown publisher the first time, because the exe isn't code-signed. Click **More info → Run anyway**.
 
-To build it yourself on Windows: `pip install -r requirements.txt nuitka`, then run the same `python -m nuitka ...` command as in `.github/workflows/build-exe.yml`.
-
-### Publishing to the Microsoft Store
-
-The **Build Store package (MSIX)** workflow makes `ScreenBalance.msix`, the file you upload in Partner Center. The Store signs it, so you don't need a code-signing certificate. Steps:
-
-1. Create a developer account at [Partner Center](https://partner.microsoft.com/dashboard) (Apps and games), then **reserve the name** "Screen Balance" (pick another if it's taken).
-2. In Partner Center, open **Product management → Product identity** and copy *Package/Identity/Name*, *Package/Identity/Publisher* and *Package/Properties/PublisherDisplayName* into the repository variables `MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER` and `MSIX_PUBLISHER_DISPLAY_NAME` (GitHub: **Settings → Secrets and variables → Actions → Variables**).
-3. Run **Build Store package (MSIX)** from the Actions tab (**Run workflow**, version like `1.0.0.0`; raise it for each update) and download **ScreenBalance-msix**.
-4. Create a submission: upload the `.msix` under **Packages**, fill the listing from [`docs/store-listing.md`](docs/store-listing.md), use [`PRIVACY.md`](PRIVACY.md) as the privacy policy URL, and explain the `runFullTrust` capability with the text given there.
-
-In the Store version, **Start with Windows** uses Windows' startup task (you also see it under **Settings → Apps → Startup**), because Store apps can't use the registry. Your data folder stays `%USERPROFILE%\.screenbalance\`.
+A Microsoft Store version is on its way; once it's published, that will be the easiest way to install and update it.
 
 ### Option B: run from source
 
@@ -230,13 +221,15 @@ python -m pip install --user -r requirements.txt   # needs Pillow 13+, which has
 pythonw screen_balance.py
 ```
 
+### Once it's running
+
 An hourglass icon appears in the system tray. If you don't see it, click the **^** arrow on the taskbar.
 
-**4. (Optional) Start it with Windows:** turn on **Start with Windows** in Settings or in the tray menu.
+To have it start with Windows, turn on **Start with Windows** in Settings or in the tray menu.
 
 When it starts, a small Windows notification tells you **Screen Balance is running**, so you know it's on even when Windows hides the icon behind the **^** arrow. You can switch the notification off in Settings, and it never shows during Do not disturb.
 
-> **Can't see the icon?** Windows 11 hides new tray icons. To always show it, go to **Taskbar settings → Other system tray icons** and turn on the entry for Screen Balance (listed as *Python* or *pythonw*). In Task Manager's **Startup apps** it also appears as **pythonw.exe**, because Python runs the app.
+> **Can't see the icon?** Windows 11 hides new tray icons. To always show it, go to **Taskbar settings → Other system tray icons** and turn on the entry for Screen Balance. It's listed as *ScreenBalance* for the downloaded app, or as *Python* / *pythonw* when you run it from source (Task Manager's **Startup apps** shows *pythonw.exe* in that case too, because Python runs the app).
 
 ### Using it
 
@@ -277,6 +270,23 @@ Your history is protected:
 - It saves every 30 seconds and when Windows shuts down.
 - Starting it again while it's running (for example double-clicking **Start Screen Balance.bat**) restarts it cleanly: the running copy saves and steps aside, and your current stretch and break countdown carry over.
 - Anything unexpected is written to `error.log`.
+
+## Building and publishing
+
+### The .exe
+
+`ScreenBalance.exe` is built by the **Build Windows exe** workflow on every push: [Nuitka](https://nuitka.net) translates the Python code to C and compiles it into a single native Windows program, and the workflow checks that it starts. To build it yourself on Windows, run `pip install -r requirements.txt nuitka`, then the same `python -m nuitka ...` command as in [`build-exe.yml`](.github/workflows/build-exe.yml).
+
+### The Microsoft Store package
+
+The **Build Store package (MSIX)** workflow makes `ScreenBalance.msix`, the file you upload in Partner Center, then installs it on the build machine and checks that it starts. The Store signs the package, so you don't need a code-signing certificate. To publish:
+
+1. Create a developer account at [Partner Center](https://partner.microsoft.com/dashboard) (Apps and games), then **reserve the name** "Screen Balance" (pick another if it's taken).
+2. In Partner Center, open **Product management → Product identity** and copy *Package/Identity/Name*, *Package/Identity/Publisher* and *Package/Properties/PublisherDisplayName* into the repository variables `MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER` and `MSIX_PUBLISHER_DISPLAY_NAME` (GitHub: **Settings → Secrets and variables → Actions → Variables**). Without them the package builds with test values that the Store won't accept.
+3. Run **Build Store package (MSIX)** from the Actions tab (**Run workflow**, with a version like `1.0.0.0`; raise it for each update, keeping the last number `0`) and download **ScreenBalance-msix**.
+4. Create a submission: upload the `.msix` under **Packages**, fill in the listing from [`docs/store-listing.md`](docs/store-listing.md), use [`PRIVACY.md`](PRIVACY.md) as the privacy policy URL, and explain the `runFullTrust` capability with the text given there.
+
+In the Store version, **Start with Windows** uses Windows' startup task instead of the registry (Store apps can't write to the registry's startup list), so it also shows under **Settings → Apps → Startup**. The data folder is the same, `%USERPROFILE%\.screenbalance\`.
 
 ## Project layout
 
