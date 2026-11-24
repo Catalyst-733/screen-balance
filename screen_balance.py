@@ -418,7 +418,62 @@ def _autostart_command() -> str:
     return f'"{exe}" "{os.path.abspath(__file__)}"'
 
 
+def _running_packaged() -> bool:
+    """True when installed as an MSIX package (from the Microsoft Store)."""
+    try:
+        n = wt.UINT(0)
+        rc = kernel32.GetCurrentPackageFullName(ctypes.byref(n), None)
+    except (AttributeError, OSError):
+        return False
+    return rc != 15700  # APPMODEL_ERROR_NO_PACKAGE
+
+
+PACKAGED = _running_packaged()
+
+# Store/MSIX apps can't use the registry Run key: they declare a startup task in their
+# manifest instead, which the user (or the app, with the user's OK) switches on and off.
+STARTUP_TASK_ID = "ScreenBalanceStartup"
+_startup_state = {"on": False}
+
+
+def _startup_task(action=None) -> bool:
+    """Read (action=None) or change ("enable"/"disable") the startup task. Returns whether it
+    is on afterwards. A user who switched it off in Windows Settings can only switch it back
+    on there, so in that case the Startup apps page is opened."""
+    import asyncio
+    from winrt.windows.applicationmodel import StartupTask, StartupTaskState
+
+    on_states = (StartupTaskState.ENABLED, StartupTaskState.ENABLED_BY_POLICY)
+
+    async def go():
+        task = await StartupTask.get_async(STARTUP_TASK_ID)
+        state = task.state
+        if action == "enable" and state not in on_states:
+            state = await task.request_enable_async()
+        elif action == "disable" and state == StartupTaskState.ENABLED:
+            task.disable()
+            state = task.state
+        return state
+
+    state = asyncio.run(go())
+    if action == "enable" and state not in on_states:
+        os.startfile("ms-settings:startupapps")
+    _startup_state["on"] = state in on_states
+    return _startup_state["on"]
+
+
+def refresh_startup_state() -> None:
+    """Re-read the startup task (the user can change it in Windows Settings at any time)."""
+    if PACKAGED:
+        try:
+            _startup_task()
+        except Exception:
+            log_error("could not read the startup task:" + os.linesep + traceback.format_exc())
+
+
 def autostart_enabled() -> bool:
+    if PACKAGED:
+        return _startup_state["on"]
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
@@ -443,6 +498,12 @@ def autostart_target_exists() -> bool:
 
 
 def set_autostart(enabled: bool) -> None:
+    if PACKAGED:
+        try:
+            _startup_task("enable" if enabled else "disable")
+        except Exception as e:
+            raise OSError(f"startup task: {e}") from e
+        return
     import winreg
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
         if enabled:
@@ -2409,7 +2470,10 @@ class ScreenBalance:
 
     # ---------------- other commands ----------------
     def _cmd_toggle_autostart(self):
-        set_autostart(not autostart_enabled())
+        try:
+            set_autostart(not autostart_enabled())
+        except OSError:
+            log_error("could not change Start with Windows:" + os.linesep + traceback.format_exc())
         self._menu_sig = None
         self._menu_text = self._menu_snapshot()
         self.icon.update_menu()
@@ -2433,7 +2497,13 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(CONFIG_PATH):
         save_json(CONFIG_PATH, DEFAULT_CONFIG)
-    if autostart_enabled() and not autostart_target_exists():
+    if PACKAGED:
+        def keep_startup_state_fresh():
+            while True:
+                refresh_startup_state()
+                time.sleep(60)
+        threading.Thread(target=keep_startup_state_fresh, daemon=True).start()
+    elif autostart_enabled() and not autostart_target_exists():
         set_autostart(True)  # the copy it pointed at was moved or deleted: point at this one
     app = ScreenBalance()
     try:

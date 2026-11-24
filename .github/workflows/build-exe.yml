@@ -33,7 +33,7 @@ jobs:
           python -m pip install -r requirements.txt nuitka==4.2.2 zstandard
 
       - name: Draw the app icon
-        run: python tools/make_icon.py screen_balance.ico
+        run: python tools/make_icon.py ico screen_balance.ico
 
       - name: Compile to C and build the exe
         run: >

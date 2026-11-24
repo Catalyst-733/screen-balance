@@ -1,0 +1,5 @@
+# Extra packages for the Microsoft Store (MSIX) build only: "Start with Windows" uses
+# the Windows startup task API there, since Store apps can't use the registry Run key.
+winrt-runtime==3.2.1
+winrt-Windows.ApplicationModel==3.2.1
+winrt-Windows.Foundation==3.2.1

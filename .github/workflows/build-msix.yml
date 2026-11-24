@@ -1,0 +1,120 @@
+# Builds ScreenBalance.msix, the package you upload to the Microsoft Store in Partner Center.
+# The Store signs it, so no code-signing certificate is needed.
+#
+# Set these repository variables (Settings > Secrets and variables > Actions > Variables)
+# to the values Partner Center shows under Product management > Product identity:
+#   MSIX_IDENTITY_NAME            Package/Identity/Name
+#   MSIX_PUBLISHER                Package/Identity/Publisher        (CN=...)
+#   MSIX_PUBLISHER_DISPLAY_NAME   Package/Properties/PublisherDisplayName
+# Without them it still builds, with test values, so you can try the package locally.
+name: Build Store package (MSIX)
+
+on:
+  push:
+    paths:
+      - "*.py"
+      - "requirements.txt"
+      - "tools/make_icon.py"
+      - "packaging/msix/**"
+      - ".github/workflows/build-msix.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version (the Store needs the last number to be 0, e.g. 1.0.1.0)"
+        default: "1.0.0.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME || 'ScreenBalance.Test' }}
+  PUBLISHER: ${{ vars.MSIX_PUBLISHER || 'CN=ScreenBalanceTest' }}
+  PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME || 'Screen Balance (test build)' }}
+  VERSION: ${{ inputs.version || '1.0.0.0' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r packaging/msix/requirements.txt nuitka==4.2.2 zstandard
+
+      - name: Draw the icons
+        run: |
+          python tools/make_icon.py ico screen_balance.ico
+          python tools/make_icon.py msix layout/Assets
+
+      - name: Compile to C and build the program
+        run: >
+          python -m nuitka screen_balance.py
+          --standalone
+          --windows-console-mode=disable
+          --enable-plugin=tk-inter
+          --include-module=pystray._win32
+          --include-package=winrt
+          --windows-icon-from-ico=screen_balance.ico
+          --product-name="Screen Balance"
+          --file-description="Screen Balance"
+          --product-version=${{ env.VERSION }}
+          --file-version=${{ env.VERSION }}
+          --output-filename=ScreenBalance.exe
+          --output-dir=build
+          --assume-yes-for-downloads
+
+      - name: Lay out the package
+        shell: pwsh
+        run: |
+          if ($env:VERSION -notmatch '^\d+\.\d+\.\d+\.0$') { Write-Error "Version must look like 1.2.3.0"; exit 1 }
+          Copy-Item build\screen_balance.dist\* layout -Recurse
+          $m = Get-Content packaging\msix\AppxManifest.template.xml -Raw
+          foreach ($k in 'IDENTITY_NAME', 'PUBLISHER', 'PUBLISHER_DISPLAY_NAME', 'VERSION') {
+            $v = [Security.SecurityElement]::Escape((Get-Item "env:$k").Value)
+            $m = $m.Replace("{$k}", $v)
+          }
+          Set-Content layout\AppxManifest.xml $m -Encoding utf8
+          Get-ChildItem layout | Select-Object Name
+
+      - name: Pack ScreenBalance.msix
+        shell: pwsh
+        run: |
+          $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter makeappx.exe |
+            Where-Object FullName -like '*\x64\*' | Sort-Object FullName -Descending | Select-Object -First 1
+          & $makeappx.FullName pack /d layout /p ScreenBalance.msix /o
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Check that it installs and starts as a package
+        shell: pwsh
+        run: |
+          # install the unpacked layout the way a developer would (no signature needed)
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /t REG_DWORD /f /v AllowDevelopmentWithoutDevLicense /d 1
+          Add-AppxPackage -Register layout\AppxManifest.xml
+          $pkg = Get-AppxPackage -Name $env:IDENTITY_NAME
+          Write-Host "Installed $($pkg.PackageFullName)"
+          Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!ScreenBalance"
+          Start-Sleep -Seconds 25
+          $log = Join-Path $HOME ".screenbalance\error.log"
+          $errors = if (Test-Path $log) { Get-Content $log -Raw } else { "" }
+          if ($errors) { Write-Host "error.log:"; Write-Host $errors }
+          $running = Get-Process ScreenBalance -ErrorAction SilentlyContinue
+          if (-not $running) { Write-Error "ScreenBalance.exe isn't running 25 s after launch"; exit 1 }
+          if ($errors -match "startup task") { Write-Error "The packaged app couldn't use its startup task"; exit 1 }
+          Write-Host "Running as a package; startup task readable"
+          $running | Stop-Process -Force
+          Remove-AppxPackage $pkg.PackageFullName
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenBalance-msix
+          path: ScreenBalance.msix
+          if-no-files-found: error
