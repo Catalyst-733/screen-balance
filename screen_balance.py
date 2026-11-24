@@ -408,6 +408,9 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
 def _autostart_command() -> str:
+    if "__compiled__" in globals():
+        # built into ScreenBalance.exe with Nuitka: start the .exe itself, there is no script
+        return f'"{os.path.abspath(sys.argv[0])}"'
     exe = sys.executable
     pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
     if os.path.exists(pyw):

@@ -1,0 +1,72 @@
+# Builds ScreenBalance.exe: Nuitka translates the Python code to C and compiles it into
+# one native Windows program, so Python doesn't need to be installed to run it.
+# Download it from the run's "Artifacts" section on the Actions tab.
+name: Build Windows exe
+
+on:
+  push:
+    paths:
+      - "*.py"
+      - "requirements.txt"
+      - "tools/make_icon.py"
+      - ".github/workflows/build-exe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt nuitka==4.2.2 zstandard
+
+      - name: Draw the app icon
+        run: python tools/make_icon.py screen_balance.ico
+
+      - name: Compile to C and build the exe
+        run: >
+          python -m nuitka screen_balance.py
+          --onefile
+          --windows-console-mode=disable
+          --enable-plugin=tk-inter
+          --include-module=pystray._win32
+          --windows-icon-from-ico=screen_balance.ico
+          --product-name="Screen Balance"
+          --file-description="Screen Balance"
+          --product-version=1.0.0
+          --file-version=1.0.0
+          --output-filename=ScreenBalance.exe
+          --output-dir=build
+          --assume-yes-for-downloads
+
+      - name: Check that it starts
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath build\ScreenBalance.exe -PassThru
+          Start-Sleep -Seconds 20
+          $log = Join-Path $HOME ".screenbalance\error.log"
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.HasExited) {
+            Write-Error "ScreenBalance.exe quit on its own (exit code $($p.ExitCode))"
+            exit 1
+          }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "ScreenBalance.exe was still running after 20 s"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenBalance-exe
+          path: build/ScreenBalance.exe
+          if-no-files-found: error
